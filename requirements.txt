@@ -1,0 +1,6 @@
+numba==0.64.0
+numpy==2.4.2
+optuna==4.7.0
+pandas==2.3.3
+plotly==6.6.0
+vectorbtpro @ git+https://github.com/polakowo/vectorbt.pro.git@286ef59b6ce30bf8f0dfdf2493110ed8715be0dc
