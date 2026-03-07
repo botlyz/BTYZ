@@ -1,57 +1,66 @@
 # BTYZ
 
-Backtesting et optimisation de stratégies mean reversion sur HYPE/USDT (5min) avec VectorBT PRO et Optuna.
+Backtesting et optimisation de stratégies mean reversion crypto avec VectorBT PRO.
 
-## Données
+## Structure
 
-- **HYPEUSDT.csv** : ~416 jours de données OHLCV 5 minutes (dec 2024 → jan 2026)
-
-## Stratégies
-
-Deux variantes d'enveloppe testées :
-
-- **Enveloppe ATR** : SMA ± multiplicateur × ATR
-- **Keltner Channel** : EMA ± multiplicateur × ATR
-
-Logique identique pour les deux : on achète quand le prix touche la bande inférieure, on vend quand il revient à la moyenne. Pareil en short sur la bande supérieure. Les prix d'exécution sont simulés aux niveaux des bandes (limit orders).
+```
+BTYZ/
+├── config.py                    # constantes globales (fees, seuils, etc.)
+├── data/raw/                    # données brutes OHLCV (csv)
+├── src/
+│   ├── download.py              # telechargement données via CCXT
+│   ├── opti.py                  # optimisation multiprocess (VBT natif)
+│   └── strategies/              # stratégies clean
+│       ├── keltner.py           # Keltner Channel (EMA + ATR)
+│       └── atr_envelope.py      # Enveloppe ATR (SMA + ATR)
+├── notebooks/
+│   ├── analyse.ipynb            # analyse des resultats d'opti
+│   └── research/                # notebooks de recherche (brouillons)
+├── cache/                       # resultats d'opti (.pickle)
+└── requirements.txt
+```
 
 ## Workflow
 
-### 1. Backtest simple
+```
+1. notebooks/research/  → prototypage & recherche de strats
+2. src/strategies/      → version clean de la strat (.py)
+3. src/opti.py          → lance l'opti multiprocess + sauvegarde pickle
+4. notebooks/analyse.ipynb → charge le pickle et analyse les resultats
+```
 
-On teste la strat avec des paramètres arbitraires sur une période courte (2 mois) juste pour valider que la logique fonctionne. Résultat pas concluant → normal, les params sont choisis au pif.
+## Stratégies
 
-### 2. Walk-forward optimization
+Deux variantes d'enveloppe testées en mean reversion :
 
-On découpe tout le dataset en 10 fenêtres glissantes (90 jours de train, 30 jours de test, step de 30 jours). Pour chaque fenêtre, Optuna (TPE) cherche les meilleurs paramètres sur le train (200 trials), puis on valide le meilleur sur le test.
+- **Enveloppe ATR** : SMA ± multiplicateur × ATR
+- **Keltner Channel** : EMA ± multiplicateur × ATR (+ stop loss optionnel)
 
-Paramètres optimisés :
-- `ma_window` : période de la moyenne mobile (10-500)
-- `atr_window` : période de l'ATR (5-100)
-- `atr_mult` : multiplicateur des bandes (0.5-10.0)
+Logique : on achète quand le prix touche la bande inf (survente), on vend quand il revient à la moyenne. Pareil en short sur la bande sup. Prix d'exécution simulés aux niveaux des bandes (limit orders).
 
-Contraintes : minimum 30 trades par fenêtre, drawdown max 30%.
+## Optimisation
 
-Score : `sharpe * 0.7 + total_return * 0.3 * (1 - max_drawdown)`
+Walk-forward avec VBT natif :
+- `vbt.Splitter` pour créer les fenêtres glissantes (70% train / 30% test)
+- `vbt.parameterized()` + `vbt.split()` pour le grid search
+- Multiprocess avec `engine='pathos'`
+- Resultats sauvegardés en .pickle dans `cache/`
 
-### 3. Analyse de clusters cross-fenêtres
+Params optimisés : `ma_window`, `atr_window`, `atr_mult`, `sl_stop`
 
-Le problème du walk-forward classique : chaque fenêtre peut trouver des paramètres complètement différents. Pour trouver des paramètres robustes, on analyse la stabilité cross-fenêtres :
+## Analyse
 
-1. Pour chaque fenêtre, on garde le top 30% des trials (par score sur le train)
-2. On normalise les paramètres entre 0 et 1 (sinon `ma_window` 10-500 écraserait `atr_mult` 0.5-10)
-3. Pour chaque bon trial, on calcule la distance euclidienne avec les bons trials des autres fenêtres
-4. Si un trial a des voisins proches (distance < 30%) dans 70%+ des autres fenêtres → zone verte (robuste). 50-70% → orange.
-5. Paramètres finaux = médiane du meilleur cluster
-
-### 4. Backtest final
-
-On lance le backtest sur tout le dataset avec les paramètres trouvés par l'analyse de clusters (100% du capital cette fois).
+Le notebook `analyse.ipynb` charge le pickle et fait :
+- Correlation train/test (overfitting check)
+- Heatmaps sharpe median + delta test-train
+- Recherche de combos robustes (sharpe > 0 sur 50%+ des fenetres)
+- Backtest final avec plot des bandes
+- Top 10 des meilleures combos
 
 ## Stack
 
-- Python 3
+- Python 3.13
 - VectorBT PRO (backtesting + indicateurs)
-- Optuna (optimisation TPE)
 - Plotly (visualisation)
-- Pandas / NumPy
+- Pandas / NumPy / Numba
