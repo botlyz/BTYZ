@@ -5,4 +5,4 @@ __pycache__/
 *.cfg
 .DS_Store
 cache/
-data/raw/*.csv
+data/raw/
