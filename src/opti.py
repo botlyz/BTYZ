@@ -36,10 +36,10 @@ FULL = {
 }
 
 #grille de params (commune aux deux modes)
-grid_ma = list(range(20, 300, 20))
-grid_atr_w = list(range(10, 80, 10))
-grid_atr_m = list(np.arange(1.0, 8.0, 0.5))
-grid_sl = list(np.arange(0.02, 0.14, 0.02))
+grid_ma = list(range(20, 220, 20))
+grid_atr_w = list(range(10, 220, 20))
+grid_atr_m = list(np.arange(1.0, 8.5, 0.5))
+grid_sl = list(np.arange(0.02, 0.11, 0.02))
 #============================================================
 
 
@@ -62,8 +62,9 @@ def load_data(exchange, tf, pair):
     return data
 
 
-def run_opti(data, pair, tf, exchange):
+def run_opti(data, pair, tf, exchange, cache_dir='./cache'):
     """lance le walk-forward grid search sur une paire et sauvegarde le pickle"""
+    import gc
     import multiprocessing
     n_cpus = multiprocessing.cpu_count()
 
@@ -104,11 +105,26 @@ def run_opti(data, pair, tf, exchange):
 
     results = cv_kc(data, **PARAM_GRID)
 
-    os.makedirs('./cache', exist_ok=True)
-    out_path = f'./cache/kc_wfsl_{pair}_{tf}_{exchange}.pickle'
+    os.makedirs(cache_dir, exist_ok=True)
+    out_path = f'{cache_dir}/kc_wfsl_{pair}_{tf}_{exchange}.pickle'
     vbt.save(results, out_path)
     print(f"Sauvegardé dans {out_path}")
-    return results
+
+    #nettoyage mémoire : tuer les pools pathos et forcer le gc
+    #pathos garde des refs aux pools entre les appels sinon
+    del results, cv_kc, param_kc, splitter, PARAM_GRID
+    try:
+        from pathos.pools import _clear
+        _clear()
+    except Exception:
+        pass
+    try:
+        from multiprocess.pool import Pool
+        Pool._pool = []
+    except Exception:
+        pass
+    gc.collect()
+    print(f"  Mémoire nettoyée")
 
 
 if __name__ == '__main__':
@@ -126,7 +142,6 @@ if __name__ == '__main__':
         combos = []
 
         if MODE == 'full':
-            #scanner tous les csv dans les dossiers exchange/tf
             for ex in FULL['exchanges']:
                 for t in FULL['timeframes']:
                     data_dir = f'./data/raw/{ex}/{t}'
@@ -138,37 +153,72 @@ if __name__ == '__main__':
                             p = f.replace('.csv', '')
                             combos.append((ex, t, p))
         else:
-            #multi : liste explicite
             for ex in SCAN['exchanges']:
                 for t in SCAN['timeframes']:
                     for p in SCAN['pairs']:
                         combos.append((ex, t, p))
 
-        print(f"Scan {MODE} : {len(combos)} combinaisons a tester")
-        done = 0
+        #dossier cache selon le mode
+        if MODE == 'full':
+            #regroupe tout dans un sous-dossier par scan
+            exs = '_'.join(FULL['exchanges'])
+            tfs = '_'.join(FULL['timeframes'])
+            cache_dir = f'./cache/full_{exs}_{tfs}'
+        else:
+            cache_dir = './cache'
+
+        os.makedirs(cache_dir, exist_ok=True)
+
+        #filtrer les skips (sans charger les data)
+        to_run = []
         skipped = 0
-
         for ex, t, p in combos:
-            print(f"\n{'='*50}")
-            print(f"=== {p} {t} {ex} ({done+1}/{len(combos)}) ===")
-
-            #skip si deja fait
-            cache_path = f'./cache/kc_wfsl_{p}_{t}_{ex}.pickle'
+            cache_path = f'{cache_dir}/kc_wfsl_{p}_{t}_{ex}.pickle'
             if os.path.exists(cache_path):
-                print(f"Deja dans le cache, skip")
                 skipped += 1
-                done += 1
                 continue
+            data_path = f'./data/raw/{ex}/{t}/{p}.csv'
+            if not os.path.exists(data_path):
+                skipped += 1
+                continue
+            to_run.append((ex, t, p))
 
+        total = len(to_run)
+        print(f"Scan {MODE} : {len(combos)} combos, {total} a lancer, {skipped} skippées")
+        print(f"Cache : {cache_dir}/")
+
+        if total == 0:
+            print("Rien a faire.")
+            sys.exit(0)
+
+        import time
+        start_time = time.time()
+
+        for i, (ex, t, p) in enumerate(to_run):
+            elapsed = time.time() - start_time
+            if i > 0:
+                avg = elapsed / i
+                eta = avg * (total - i)
+                eta_min = int(eta // 60)
+                eta_sec = int(eta % 60)
+                speed = i / elapsed * 60
+                print(f"\n{'='*60}")
+                print(f"  GLOBAL: {i}/{total} ({i/total*100:.0f}%) | {speed:.1f} paires/min | ETA {eta_min}m{eta_sec:02d}s")
+            else:
+                print(f"\n{'='*60}")
+
+            print(f"  >>> {p} {t} {ex} [{i+1}/{total}]")
+            print(f"{'='*60}")
+
+            #charger les data juste avant, libérer juste après
             data = load_data(ex, t, p)
-            if data is None:
-                print(f"Pas de data, skip (lance download.py)")
-                skipped += 1
-                done += 1
-                continue
+            run_opti(data, p, t, ex, cache_dir=cache_dir)
+            del data
 
-            run_opti(data, p, t, ex)
-            done += 1
-
-        print(f"\n{'='*50}")
-        print(f"Terminé : {done - skipped} opti lancées, {skipped} skippées")
+        elapsed = time.time() - start_time
+        elapsed_min = int(elapsed // 60)
+        elapsed_sec = int(elapsed % 60)
+        print(f"\n{'='*60}")
+        print(f"Terminé : {total} opti en {elapsed_min}m{elapsed_sec:02d}s, {skipped} skippées")
+        print(f"Resultats dans {cache_dir}/")
+        print(f"{'='*60}")
