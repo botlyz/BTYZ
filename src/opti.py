@@ -11,19 +11,28 @@ from src.strategies.keltner import run_backtest
 #============================================================
 # CONFIG - modifier ici pour changer ce qu'on opti
 #============================================================
-#mode 'single' = 1 seule paire, mode 'multi' = scan plusieurs paires/tf
-MODE = 'single'
+#mode 'single' = 1 seule paire
+#mode 'multi' = scan les paires listées dans SCAN
+#mode 'full' = scan TOUS les csv disponibles dans data/raw/<exchange>/<tf>/
+MODE = 'full'
 
 #config single (utilisé si MODE = 'single')
-pair = 'BTCUSDT'
-tf = '1h'
-exchange = 'binance'
+pair = 'BTC'
+tf = '5m'
+exchange = 'lighter'
 
 #config multi (utilisé si MODE = 'multi')
 SCAN = {
-    'exchanges': ['binance'],
-    'timeframes': ['1h', '4h'],
-    'pairs': ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
+    'exchanges': ['lighter'],
+    'timeframes': ['5m'],
+    'pairs': ['BTC', 'ETH', 'SOL', 'DOGE', 'HYPE'],
+}
+
+#config full (utilisé si MODE = 'full')
+#scanne tout les csv dans data/raw/<exchange>/<tf>/
+FULL = {
+    'exchanges': ['lighter'],
+    'timeframes': ['5m'],
 }
 
 #grille de params (commune aux deux modes)
@@ -112,15 +121,30 @@ if __name__ == '__main__':
             sys.exit(1)
         run_opti(data, pair, tf, exchange)
 
-    elif MODE == 'multi':
-        #scan sur toutes les combinaisons exchange/tf/pair
+    elif MODE in ('multi', 'full'):
+        #construire la liste de combos selon le mode
         combos = []
-        for ex in SCAN['exchanges']:
-            for t in SCAN['timeframes']:
-                for p in SCAN['pairs']:
-                    combos.append((ex, t, p))
 
-        print(f"Scan multi : {len(combos)} combinaisons a tester")
+        if MODE == 'full':
+            #scanner tous les csv dans les dossiers exchange/tf
+            for ex in FULL['exchanges']:
+                for t in FULL['timeframes']:
+                    data_dir = f'./data/raw/{ex}/{t}'
+                    if not os.path.isdir(data_dir):
+                        print(f"Dossier {data_dir} introuvable, skip")
+                        continue
+                    for f in sorted(os.listdir(data_dir)):
+                        if f.endswith('.csv'):
+                            p = f.replace('.csv', '')
+                            combos.append((ex, t, p))
+        else:
+            #multi : liste explicite
+            for ex in SCAN['exchanges']:
+                for t in SCAN['timeframes']:
+                    for p in SCAN['pairs']:
+                        combos.append((ex, t, p))
+
+        print(f"Scan {MODE} : {len(combos)} combinaisons a tester")
         done = 0
         skipped = 0
 
