@@ -9,7 +9,7 @@ import datetime
 
 
 #=== CONFIG ===
-PROXY_URL = "***REDACTED***"
+PROXY_URL = os.environ.get("PROXY_URL", "")
 LIGHTER_API = "https://mainnet.zklighter.elliot.ai/api/v1"
 LIGHTER_START = 1737100800  #17 jan 2025 en timestamp secondes
 MAX_CANDLES = 500  #max par requete lighter
