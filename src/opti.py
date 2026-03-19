@@ -44,11 +44,11 @@ grid_sl = list(np.arange(0.02, 0.11, 0.02))
 
 
 def kc_objective(data, ma_window, atr_window, atr_mult, sl_stop):
-    """fonction objectif pour le grid search, retourne le sharpe brut
+    """fonction objectif pour le grid search, retourne toutes les metriques
     le filtrage (min trades, max dd) se fait dans l'analyse pas ici
     sinon les combos valides en train sont NaN en test (fenetres plus courtes)"""
     pf = run_backtest(data, ma_window, atr_window, atr_mult, sl_stop)
-    return pf.sharpe_ratio
+    return pf.stats()
 
 
 def load_data(exchange, tf, pair):
