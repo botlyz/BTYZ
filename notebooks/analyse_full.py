@@ -420,14 +420,14 @@ def _section4(combo_scores, detected_params, mo, np, pairs, pd, valid_combos):
 
             # Trouver les voisins (±1 step sur chaque axe)
             _neighbor_scores = []
-            for _p in PARAM_COLS:
+            for _p in detected_params:
                 _vals = _grid[_p]
                 _idx = _vals.index(_params[_p]) if _params[_p] in _vals else -1
                 for _delta in [-1, 1]:
                     _ni = _idx + _delta
                     if 0 <= _ni < len(_vals):
                         _neighbor_params = {**_params, _p: _vals[_ni]}
-                        _key = tuple(_neighbor_params[p] for p in PARAM_COLS)
+                        _key = tuple(_neighbor_params[p] for p in detected_params)
                         if _key in _scores.index:
                             _neighbor_scores.append(float(_scores.loc[_key]))
 
