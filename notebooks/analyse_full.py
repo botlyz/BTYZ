@@ -18,26 +18,28 @@ def _imports():
     from scipy import stats as sp_stats
     from vectorbtpro import vbt
 
-    PARAM_COLS = ['ma_window', 'atr_window', 'atr_mult', 'sl_stop']
     METRIC_COLS = [
         'Total Return [%]', 'Max Drawdown [%]', 'Win Rate [%]',
         'Sharpe Ratio', 'Sortino Ratio', 'Calmar Ratio',
         'Profit Factor', 'Expectancy', 'Total Trades',
     ]
 
+    # Colonnes de paramètres par stratégie
+    PARAMS_BY_STRATEGY = {
+        'keltner': ['ma_window', 'atr_window', 'atr_mult', 'sl_stop'],
+        'ram':     ['ma_window', 'env_pct', 'sl_pct'],
+    }
+
     _PARQUET_DIR = '.parquet_cache'
 
     def load_pickle(path):
         """Charge un pickle VBT → DataFrame. Cache parquet automatique pour les rechargements."""
-        # Chemin parquet dans le même dossier que le pickle
-        _pq_dir = os.path.join(os.path.dirname(path), _PARQUET_DIR)
+        _pq_dir  = os.path.join(os.path.dirname(path), _PARQUET_DIR)
         _pq_path = os.path.join(_pq_dir, os.path.basename(path).replace('.pickle', '.parquet'))
 
-        # Si le parquet existe et est plus récent que le pickle → lecture rapide
         if os.path.exists(_pq_path) and os.path.getmtime(_pq_path) >= os.path.getmtime(path):
             return pd.read_parquet(_pq_path)
 
-        # Sinon charger le pickle et convertir les métriques
         raw = vbt.load(path)
         if isinstance(raw, pd.Series) and None in raw.index.names:
             df = raw.unstack(level=-1)
@@ -49,7 +51,6 @@ def _imports():
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
-        # Sauvegarder en parquet pour le prochain chargement
         try:
             os.makedirs(_pq_dir, exist_ok=True)
             df.to_parquet(_pq_path)
@@ -58,14 +59,27 @@ def _imports():
 
         return df
 
-    def pair_from_filename(fname):
-        """kc_wfsl_BTC_5m_lighter.pickle → BTC"""
-        name = os.path.basename(fname).replace('.pickle', '')
+    def info_from_filename(fname):
+        """
+        kc_wfsl_BTC_5m_lighter.pickle  → ('keltner', 'BTC',  '5m', 'lighter')
+        ram_HYPE_5m_lighter.pickle      → ('ram',     'HYPE', '5m', 'lighter')
+        """
+        name  = os.path.basename(fname).replace('.pickle', '')
         parts = name.split('_')
-        # format: kc_wfsl_{PAIR}_{tf}_{exchange}
-        if len(parts) >= 3:
-            return parts[2]
-        return name
+        if parts[0] == 'ram':
+            # ram_{PAIR}_{tf}_{exchange}
+            return 'ram', parts[1], parts[2], parts[3] if len(parts) > 3 else 'unknown'
+        else:
+            # kc_wfsl_{PAIR}_{tf}_{exchange}
+            return 'keltner', parts[2], parts[3], parts[4] if len(parts) > 4 else 'unknown'
+
+    def pair_from_filename(fname):
+        return info_from_filename(fname)[1]
+
+    def get_param_cols(df):
+        """Détecte les colonnes de paramètres depuis les niveaux d'index du DataFrame."""
+        non_param = {'split', 'set', None}
+        return [n for n in df.index.names if n not in non_param]
 
     def compute_dsr(sharpe_values, T):
         """
@@ -98,10 +112,12 @@ def _imports():
         return float(sp_stats.norm.cdf(z))
 
     return (
-        PARAM_COLS,
+        PARAMS_BY_STRATEGY,
         compute_dsr,
+        get_param_cols,
         glob_mod,
         go,
+        info_from_filename,
         load_pickle,
         mo,
         np,
@@ -152,7 +168,9 @@ def _controls(glob_mod, mo, os):
 @app.cell
 def _load_data(
     folder_selector,
+    get_param_cols,
     glob_mod,
+    info_from_filename,
     load_pickle,
     mo,
     os,
@@ -169,9 +187,9 @@ def _load_data(
     def _load_one(f):
         pair = pair_from_filename(f)
         try:
-            return pair, load_pickle(f)
+            return pair, load_pickle(f), info_from_filename(f)
         except Exception:
-            return pair, None
+            return pair, None, None
 
     import multiprocessing as _mp, subprocess as _sp
     _total_cpus = _mp.cpu_count()
@@ -182,18 +200,27 @@ def _load_data(
     with ThreadPoolExecutor(max_workers=_n_workers) as _pool:
         _results = list(_pool.map(_load_one, _files))
 
-    all_data = {pair: df for pair, df in _results if df is not None}
+    all_data  = {pair: df   for pair, df, _ in _results if df is not None}
+    file_info = {pair: info for pair, df, info in _results if df is not None}
     pairs = sorted(all_data.keys())
-    mo.output.replace(mo.md(
-        f"**{len(pairs)} paires chargées** : {', '.join(f'`{p}`' for p in pairs)}"
-    ))
-    return all_data, pairs
+
+    # Détecter strategy + param_cols depuis le premier fichier chargé
+    _first_df   = next(iter(all_data.values())) if all_data else None
+    _first_info = next(iter(file_info.values())) if file_info else None
+    detected_strategy = _first_info[0] if _first_info else 'keltner'
+    detected_params   = get_param_cols(_first_df) if _first_df is not None else ['ma_window']
+
+    mo.output.replace(mo.vstack([
+        mo.md(f"**{len(pairs)} paires chargées** — stratégie : `{detected_strategy}` · params : `{detected_params}`"),
+        mo.md(', '.join(f'`{p}`' for p in pairs)),
+    ]))
+    return all_data, detected_params, detected_strategy, file_info, pairs
 
 
 @app.cell
 def _filter_and_score(
-    PARAM_COLS,
     all_data,
+    detected_params,
     max_dd,
     min_pct_windows,
     min_return,
@@ -236,11 +263,11 @@ def _filter_and_score(
         if min_trades.value > 0 and 'Total Trades' in _test.columns:
             _mask &= _test['Total Trades'] >= min_trades.value
 
-        _pct_pass = _mask.groupby(level=PARAM_COLS).mean() * 100
+        _pct_pass = _mask.groupby(level=detected_params).mean() * 100
         valid_combos[_pair] = _pct_pass[_pct_pass >= min_pct_windows.value].index
 
         # Score composite sur toutes les combos (médiane cross-fenêtres)
-        _agg = _test.groupby(level=PARAM_COLS)[_needed].median()
+        _agg = _test.groupby(level=detected_params)[_needed].median()
         _agg = _agg.dropna()
         if len(_agg) == 0:
             combo_scores[_pair] = pd.Series(dtype=float)
@@ -313,8 +340,8 @@ def _section2(combo_scores, global_stats_df, go, mo, pairs, valid_combos):
 
 @app.cell
 def _section3(
-    PARAM_COLS,
     combo_scores,
+    detected_params,
     mo,
     np,
     pairs,
@@ -332,7 +359,7 @@ def _section3(
 
         for _combo in _vcs:
             try:
-                _grp = _test.xs(_combo, level=PARAM_COLS)
+                _grp = _test.xs(_combo, level=detected_params)
             except KeyError:
                 continue
 
@@ -348,7 +375,7 @@ def _section3(
             _ret_cv = abs(float(_ret.std()) / _ret_mean) if _ret_mean != 0 else np.inf
 
             _score = float(_scores.loc[_combo]) if _combo in _scores.index else np.nan
-            _params = dict(zip(PARAM_COLS, _combo if isinstance(_combo, tuple) else [_combo]))
+            _params = dict(zip(detected_params, _combo if isinstance(_combo, tuple) else [_combo]))
 
             _rows.append({
                 'paire': _pair,
@@ -376,7 +403,7 @@ def _section3(
 
 
 @app.cell
-def _section4(PARAM_COLS, combo_scores, mo, np, pairs, pd, valid_combos):
+def _section4(combo_scores, detected_params, mo, np, pairs, pd, valid_combos):
     _rows = []
     for _pair in pairs:
         _vcs = valid_combos.get(_pair)
@@ -385,10 +412,10 @@ def _section4(PARAM_COLS, combo_scores, mo, np, pairs, pd, valid_combos):
             continue
 
         # Grille de valeurs par paramètre
-        _grid = {p: sorted(_scores.index.get_level_values(p).unique()) for p in PARAM_COLS}
+        _grid = {p: sorted(_scores.index.get_level_values(p).unique()) for p in detected_params}
 
         for _combo in _vcs:
-            _params = dict(zip(PARAM_COLS, _combo if isinstance(_combo, tuple) else [_combo]))
+            _params = dict(zip(detected_params, _combo if isinstance(_combo, tuple) else [_combo]))
             _combo_score = float(_scores.loc[_combo]) if _combo in _scores.index else np.nan
 
             # Trouver les voisins (±1 step sur chaque axe)
@@ -409,13 +436,13 @@ def _section4(PARAM_COLS, combo_scores, mo, np, pairs, pd, valid_combos):
             _ratio = (_combo_score / _neighbor_mean) if (_neighbor_mean and _neighbor_mean > 0) else np.nan
 
             _rows.append({
-                'paire': _pair,
+                'paire':              _pair,
                 **_params,
-                'score': round(_combo_score, 3),
-                'score_voisins_moy': round(_neighbor_mean, 3) if not np.isnan(_neighbor_mean) else np.nan,
-                'ratio_combo/voisins': round(_ratio, 3) if not np.isnan(_ratio) else np.nan,
-                'n_voisins': _n_neighbors,
-                'type': 'plateau' if (not np.isnan(_ratio) and _ratio < 1.2) else 'pic',
+                'score':              round(_combo_score, 3),
+                'score_voisins_moy':  round(_neighbor_mean, 3) if not np.isnan(_neighbor_mean) else np.nan,
+                'ratio_combo/voisins':round(_ratio, 3) if not np.isnan(_ratio) else np.nan,
+                'n_voisins':          _n_neighbors,
+                'type':               'plateau' if (not np.isnan(_ratio) and _ratio < 1.2) else 'pic',
             })
 
     mo.stop(not _rows, mo.vstack([
@@ -432,7 +459,7 @@ def _section4(PARAM_COLS, combo_scores, mo, np, pairs, pd, valid_combos):
 
 
 @app.cell
-def _section5(PARAM_COLS, compute_dsr, mo, np, pairs, pd, test_data):
+def _section5(compute_dsr, detected_params, mo, np, pairs, pd, test_data):
     _rows = []
     for _pair in pairs:
         _test = test_data.get(_pair)
@@ -450,7 +477,7 @@ def _section5(PARAM_COLS, compute_dsr, mo, np, pairs, pd, test_data):
             except Exception:
                 pass
 
-        _N = len(_test.groupby(level=PARAM_COLS).first())  # nb de combos
+        _N = len(_test.groupby(level=detected_params).first())  # nb de combos
         _dsr = compute_dsr(_all_sr, _T)
         _sr_max = float(np.nanmax(_all_sr))
         _sr_med = float(np.nanmedian(_all_sr))
@@ -478,19 +505,22 @@ def _section5(PARAM_COLS, compute_dsr, mo, np, pairs, pd, test_data):
 
 
 @app.cell
-def _section6_controls(mo, pairs):
+def _section6_controls(detected_params, mo, pairs):
     heatmap_pair = mo.ui.dropdown(
         options={p: p for p in pairs},
         value=pairs[0] if pairs else None,
         label='Paire (heatmap spécifique)',
     )
+    _param_opts = {p: p for p in detected_params}
     heatmap_x = mo.ui.dropdown(
-        options={'atr_mult': 'atr_mult', 'sl_stop': 'sl_stop', 'atr_window': 'atr_window'},
-        value='atr_mult', label='Axe X',
+        options=_param_opts,
+        value=detected_params[-1] if detected_params else 'ma_window',
+        label='Axe X',
     )
     heatmap_y = mo.ui.dropdown(
-        options={'ma_window': 'ma_window', 'atr_window': 'atr_window', 'sl_stop': 'sl_stop'},
-        value='ma_window', label='Axe Y',
+        options=_param_opts,
+        value=detected_params[0] if detected_params else 'ma_window',
+        label='Axe Y',
     )
     mo.output.replace(mo.hstack([heatmap_pair, heatmap_x, heatmap_y], justify="start", gap=2))
     return heatmap_pair, heatmap_x, heatmap_y
@@ -498,8 +528,8 @@ def _section6_controls(mo, pairs):
 
 @app.cell
 def _section6_heatmaps(
-    PARAM_COLS,
     combo_scores,
+    detected_params,
     go,
     heatmap_pair,
     heatmap_x,
@@ -524,7 +554,7 @@ def _section6_heatmaps(
     _global_valid = {}
     for _p in pairs:
         for _c in valid_combos.get(_p, []):
-            _c_dict = dict(zip(PARAM_COLS, _c if isinstance(_c, tuple) else [_c]))
+            _c_dict = dict(zip(detected_params, _c if isinstance(_c, tuple) else [_c]))
             _key = (_c_dict.get(_yp), _c_dict.get(_xp))
             _global_valid[_key] = _global_valid.get(_key, 0) + 1
 
@@ -574,8 +604,9 @@ def _section6_heatmaps(
 
 @app.cell
 def _section7_controls(
-    PARAM_COLS,
     combo_scores,
+    detected_params,
+    detected_strategy,
     heatmap_click,
     heatmap_pair,
     heatmap_x,
@@ -586,26 +617,23 @@ def _section7_controls(
     pd,
     valid_combos,
 ):
-    # Trouver la meilleure combo par défaut (top score parmi les valides, toutes paires)
-    _best_pair = pairs[0] if pairs else None
+    # Trouver la meilleure combo par défaut
+    _best_pair  = pairs[0] if pairs else None
     _best_combo = None
     _best_score = -np.inf
     for _p in pairs:
         _vcs = valid_combos.get(_p, [])
-        _sc = combo_scores.get(_p, pd.Series(dtype=float))
+        _sc  = combo_scores.get(_p, pd.Series(dtype=float))
         if len(_vcs) > 0 and len(_sc) > 0:
             _valid_sc = _sc.loc[_sc.index.isin(_vcs)]
             if len(_valid_sc) > 0 and float(_valid_sc.max()) > _best_score:
                 _best_score = float(_valid_sc.max())
-                _best_pair = _p
+                _best_pair  = _p
                 _best_combo = _valid_sc.idxmax()
 
-    # Valeurs par défaut depuis la meilleure combo
-    _def = dict(zip(PARAM_COLS, _best_combo if isinstance(_best_combo, tuple) else ([_best_combo] if _best_combo else [20, 10, 2.0, 0.04])))
-    if not _def:
-        _def = {'ma_window': 20, 'atr_window': 10, 'atr_mult': 2.0, 'sl_stop': 0.04}
+    _def = dict(zip(detected_params, _best_combo if isinstance(_best_combo, tuple) else ([_best_combo] if _best_combo else [])))
 
-    # Override depuis le clic heatmap si disponible
+    # Override depuis le clic heatmap
     if heatmap_click is not None and heatmap_click.value:
         try:
             _pts = heatmap_click.value.get('points', [])
@@ -617,27 +645,40 @@ def _section7_controls(
             pass
 
     bt_pair = mo.ui.dropdown(options={p: p for p in pairs}, value=_best_pair or pairs[0], label='Paire')
-    bt_ma = mo.ui.number(value=int(_def.get('ma_window', 20)), start=5, stop=500, step=1, label='ma_window')
-    bt_atrw = mo.ui.number(value=int(_def.get('atr_window', 10)), start=5, stop=500, step=1, label='atr_window')
-    bt_atrm = mo.ui.number(value=float(_def.get('atr_mult', 2.0)), start=0.5, stop=20.0, step=0.5, label='atr_mult')
-    bt_sl = mo.ui.number(value=float(_def.get('sl_stop', 0.04)), start=0.01, stop=0.5, step=0.01, label='sl_stop')
+    bt_ma   = mo.ui.number(value=int(_def.get('ma_window', 20)), start=5, stop=500, step=1, label='ma_window')
     run_btn = mo.ui.button(label='Lancer le backtest', on_click=lambda v: (v or 0) + 1, value=0)
+
+    # Contrôles spécifiques à chaque stratégie
+    if detected_strategy == 'ram':
+        bt_env = mo.ui.number(value=float(_def.get('env_pct', 0.03)), start=0.005, stop=0.30, step=0.005, label='env_pct')
+        bt_sl  = mo.ui.number(value=float(_def.get('sl_pct',  0.05)), start=0.005, stop=0.20, step=0.005, label='sl_pct')
+        _inputs = mo.hstack([bt_pair, bt_ma, bt_env, bt_sl, run_btn], justify="start", gap=2)
+        bt_atrw = None; bt_atrm = None
+    else:
+        bt_atrw = mo.ui.number(value=int(_def.get('atr_window', 10)),   start=5, stop=500,  step=1,   label='atr_window')
+        bt_atrm = mo.ui.number(value=float(_def.get('atr_mult', 2.0)),  start=0.5, stop=20, step=0.5, label='atr_mult')
+        bt_sl   = mo.ui.number(value=float(_def.get('sl_stop', 0.04)),  start=0.01, stop=0.5, step=0.01, label='sl_stop')
+        bt_env  = None
+        _inputs = mo.hstack([bt_pair, bt_ma, bt_atrw, bt_atrm, bt_sl, run_btn], justify="start", gap=2)
 
     mo.output.replace(mo.vstack([
         mo.md("## 7. Backtest final interactif"),
-        mo.md("_Paramètres pré-remplis avec la meilleure combo valide (ou depuis le clic heatmap)_"),
-        mo.hstack([bt_pair, bt_ma, bt_atrw, bt_atrm, bt_sl, run_btn], justify="start", gap=2),
+        mo.md(f"_Stratégie : `{detected_strategy}` · pré-rempli depuis la meilleure combo valide_"),
+        _inputs,
     ]))
-    return bt_atrm, bt_atrw, bt_ma, bt_pair, bt_sl, run_btn
+    return bt_atrm, bt_atrw, bt_env, bt_ma, bt_pair, bt_sl, run_btn
 
 
 @app.cell
 def _section7_backtest(
     bt_atrm,
     bt_atrw,
+    bt_env,
     bt_ma,
     bt_pair,
     bt_sl,
+    detected_strategy,
+    file_info,
     go,
     mo,
     os,
@@ -650,76 +691,75 @@ def _section7_backtest(
 
     mo.output.replace(mo.callout(mo.md("Backtest en cours..."), kind="info"))
 
-    # Import ici pour éviter la dépendance circulaire
     import sys as _sys
     if '.' not in _sys.path:
         _sys.path.insert(0, '.')
 
     try:
-        from src.strategies.keltner import run_backtest
-
-        # Charger les données
         _pair = bt_pair.value
-        _csv_paths = [
-            f'data/raw/lighter/5m/{_pair}.csv',
-            f'data/raw/{_pair}.csv',
-        ]
+
+        # Trouver exchange + tf depuis file_info
+        _info     = file_info.get(_pair)
+        _strategy = _info[0] if _info else detected_strategy
+        _tf       = _info[2] if _info else '5m'
+        _exchange = _info[3] if _info else 'lighter'
+
+        # Chercher le CSV : d'abord {pair}.csv puis {pair}USDT.csv
         _data = None
-        for _path in _csv_paths:
+        for _suf in ('.csv', 'USDT.csv'):
+            _path = f'data/raw/{_exchange}/{_tf}/{_pair}{_suf}'
             if os.path.exists(_path):
                 _data = pd.read_csv(_path)
                 _data['date'] = pd.to_datetime(_data['date'], unit='ms')
-                _data = _data.set_index('date')
+                _data = _data.set_index('date').sort_index()
                 break
 
         if _data is None:
-            mo.stop(True, mo.callout(mo.md(f"Données introuvables pour `{_pair}`"), kind="danger"))
+            mo.stop(True, mo.callout(mo.md(f"Données introuvables pour `{_pair}` ({_exchange}/{_tf})"), kind="danger"))
 
-        _pf = run_backtest(
-            _data,
-            ma_window=int(bt_ma.value),
-            atr_window=int(bt_atrw.value),
-            atr_mult=float(bt_atrm.value),
-            sl_stop=float(bt_sl.value),
-            size=1,
-        )
+        if _strategy == 'ram':
+            from src.strategies.ram_dca import run_backtest as _rb
+            _pf = _rb(_data, int(bt_ma.value), [float(bt_env.value)], [1.0], float(bt_sl.value))
 
-        # Stats VBT natif — metrics='all' pour avoir tout (drawdown duration, etc.)
+            _ma_line = vbt.MA.run(_data['close'], window=int(bt_ma.value)).ma
+            _upper   = _ma_line * (1 + float(bt_env.value))
+            _lower   = _ma_line * (1 - float(bt_env.value))
+            _band_label = f'env={float(bt_env.value)*100:.1f}%'
+        else:
+            from src.strategies.keltner import run_backtest as _rb
+            _pf = _rb(_data, int(bt_ma.value), int(bt_atrw.value), float(bt_atrm.value), float(bt_sl.value), size=1)
+
+            _ma_line = vbt.MA.run(_data['close'], window=int(bt_ma.value), wtype='Exp').ma
+            _atr     = vbt.ATR.run(_data['high'], _data['low'], _data['close'], window=int(bt_atrw.value)).atr
+            _upper   = _ma_line + float(bt_atrm.value) * _atr
+            _lower   = _ma_line - float(bt_atrm.value) * _atr
+            _band_label = f'atr_mult={bt_atrm.value}'
+
         _stats = _pf.stats(metrics='all', silence_warnings=True)
 
-        _close = _data['close']
-        _ema = vbt.MA.run(_close, window=int(bt_ma.value), wtype='Exp').ma
-        _atr = vbt.ATR.run(_data['high'], _data['low'], _close, window=int(bt_atrw.value)).atr
-        _upper = _ema + float(bt_atrm.value) * _atr
-        _lower = _ema - float(bt_atrm.value) * _atr
-
-        # Plot sur toute la période avec trades — rendu PNG (léger)
         _fig = _pf.plot()
-        _fig.add_trace(go.Scatter(x=_ema.index, y=_ema, name='EMA', line=dict(color='yellow', width=1, dash='dot'), yaxis='y'))
-        _fig.add_trace(go.Scatter(x=_upper.index, y=_upper, name='Bande sup', line=dict(color='red', width=1), yaxis='y'))
-        _fig.add_trace(go.Scatter(x=_lower.index, y=_lower, name='Bande inf', line=dict(color='green', width=1), yaxis='y'))
+        _fig.add_trace(go.Scatter(x=_ma_line.index, y=_ma_line, name='MA',       line=dict(color='yellow', width=1, dash='dot')))
+        _fig.add_trace(go.Scatter(x=_upper.index,   y=_upper,   name='Bande sup', line=dict(color='red',    width=1)))
+        _fig.add_trace(go.Scatter(x=_lower.index,   y=_lower,   name='Bande inf', line=dict(color='green',  width=1)))
         _fig.update_layout(height=600, template='plotly_dark')
 
         try:
-            _png = _fig.to_image(format='png', width=1800, height=600, scale=1)
+            _png   = _fig.to_image(format='png', width=1800, height=600, scale=1)
             _chart = mo.image(src=_png, alt='Backtest chart')
         except Exception:
-            # fallback interactif si kaleido absent
             _chart = mo.ui.plotly(_fig)
 
-        bt_result = mo.vstack([
-            mo.callout(mo.md(f"Backtest **in-sample** · **{len(_data):,}** bougies"), kind="warn"),
+        mo.output.replace(mo.vstack([
+            mo.callout(mo.md(f"Backtest **in-sample** · `{_strategy}` · **{len(_data):,}** bougies · {_band_label}"), kind="warn"),
             mo.md("### Stats"),
             mo.ui.table(pd.DataFrame({'Métrique': _stats.index, 'Valeur': _stats.values}), selection=None),
-            mo.md("### Chart (toutes les données)"),
+            mo.md("### Chart"),
             _chart,
-        ])
+        ]))
 
     except Exception as _e:
         import traceback as _tb
-        bt_result = mo.callout(mo.md(f"Erreur : `{_e}`\n```\n{_tb.format_exc()}\n```"), kind="danger")
-
-    mo.output.replace(bt_result)
+        mo.output.replace(mo.callout(mo.md(f"Erreur : `{_e}`\n```\n{_tb.format_exc()}\n```"), kind="danger"))
     return
 
 
