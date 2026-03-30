@@ -389,6 +389,17 @@ def _section3(
             _ret_mean = float(_ret.mean())
             _ret_cv = abs(float(_ret.std()) / _ret_mean) if _ret_mean != 0 else np.inf
 
+            # Médiane de Max Drawdown Duration (en jours)
+            _dd_dur_med = np.nan
+            if 'Max Drawdown Duration' in _grp.columns:
+                try:
+                    _dd_dur_med = float(
+                        pd.to_timedelta(_grp['Max Drawdown Duration'].dropna())
+                        .dt.total_seconds().median() / 86400
+                    )
+                except Exception:
+                    pass
+
             _score = float(_scores.loc[_combo]) if _combo in _scores.index else np.nan
             _params = fmt_params(dict(zip(detected_params, _combo if isinstance(_combo, tuple) else [_combo])))
 
@@ -401,6 +412,7 @@ def _section3(
                 'return_med_%': round(_ret_mean, 2),
                 'return_cv': round(_ret_cv, 3),
                 'dd_med_%': round(float(_dd.mean()), 2),
+                'dd_dur_med_j': round(_dd_dur_med, 1) if not np.isnan(_dd_dur_med) else np.nan,
                 'pct_fenetres_positives': round(_pct_pos, 1),
             })
 
@@ -414,7 +426,7 @@ def _section3(
         mo.md("_Triées par : % fenêtres positives ↓, CV Sharpe ↑ (plus bas = plus stable)_"),
         mo.ui.table(stability_df, selection=None),
     ]))
-    return
+    return (stability_df,)
 
 
 @app.cell
@@ -470,7 +482,7 @@ def _section4(combo_scores, detected_params, fmt_params, mo, np, pairs, pd, vali
         mo.md("_ratio < 1.2 → plateau (robuste) · ratio >> 1 → pic isolé (overfitting)_"),
         mo.ui.table(plateau_df, selection=None),
     ]))
-    return
+    return (plateau_df,)
 
 
 @app.cell
@@ -517,6 +529,80 @@ def _section5(compute_dsr, detected_params, mo, np, pairs, pd, test_data):
         mo.ui.table(dsr_df, selection=None),
     ]))
     return
+
+
+@app.cell
+def _section_best_params(detected_params, mo, np, pd, plateau_df, stability_df):
+    best_params_table = None
+
+    _has_data = (
+        stability_df is not None and plateau_df is not None
+        and len(stability_df) > 0 and len(plateau_df) > 0
+    )
+
+    if not _has_data:
+        mo.output.replace(mo.callout(mo.md("Pas assez de données pour les recommandations."), kind="neutral"))
+    else:
+        _merge_cols = ['paire'] + detected_params
+
+        def _round_params(df):
+            df = df.copy()
+            for _c in detected_params:
+                if _c in df.columns and df[_c].dtype == float:
+                    df[_c] = df[_c].round(6)
+            return df
+
+        _stab = _round_params(stability_df)
+        _plat = _round_params(plateau_df)
+
+        _stab_cols = [c for c in _merge_cols + ['score', 'sharpe_med', 'sharpe_cv', 'return_med_%', 'dd_med_%', 'dd_dur_med_j', 'pct_fenetres_positives'] if c in _stab.columns]
+        _plat_cols = [c for c in _merge_cols + ['ratio_combo/voisins', 'type'] if c in _plat.columns]
+
+        _merged = pd.merge(_stab[_stab_cols], _plat[_plat_cols], on=_merge_cols, how='inner')
+
+        if 'type' in _merged.columns:
+            _plateaux = _merged[_merged['type'] == 'plateau'].copy()
+            if len(_plateaux) == 0:
+                _plateaux = _merged.copy()
+        else:
+            _plateaux = _merged.copy()
+
+        if len(_plateaux) == 0:
+            mo.output.replace(mo.callout(mo.md("Aucun paramètre plateau trouvé."), kind="warn"))
+        else:
+            def _norm(s):
+                r = s.max() - s.min()
+                return (s - s.min()) / (r if r > 0 else 1.0)
+
+            _score = pd.Series(0.0, index=_plateaux.index)
+            if 'pct_fenetres_positives' in _plateaux.columns:
+                _score += _norm(_plateaux['pct_fenetres_positives']) * 2
+            if 'sharpe_med' in _plateaux.columns:
+                _score += _norm(_plateaux['sharpe_med'].clip(upper=_plateaux['sharpe_med'].quantile(0.95))) * 2
+            if 'return_med_%' in _plateaux.columns:
+                _score += _norm(_plateaux['return_med_%'])
+            if 'dd_med_%' in _plateaux.columns:
+                _score -= _norm(_plateaux['dd_med_%'])
+            if 'sharpe_cv' in _plateaux.columns:
+                _score -= _norm(_plateaux['sharpe_cv'].clip(upper=_plateaux['sharpe_cv'].quantile(0.95)))
+            if 'ratio_combo/voisins' in _plateaux.columns:
+                _score -= _norm(_plateaux['ratio_combo/voisins'])
+
+            _plateaux = _plateaux.copy()
+            _plateaux['rec_score'] = (_score / 7).round(3)
+
+            _display_cols = [c for c in ['paire'] + detected_params + ['rec_score', 'sharpe_med', 'return_med_%', 'dd_med_%', 'dd_dur_med_j', 'pct_fenetres_positives', 'ratio_combo/voisins'] if c in _plateaux.columns]
+            _best = _plateaux.sort_values('rec_score', ascending=False).head(30)[_display_cols].reset_index(drop=True)
+
+            best_params_table = mo.ui.table(_best, selection='single')
+
+            mo.output.replace(mo.vstack([
+                mo.md("## 6. Paramètres recommandés"),
+                mo.md("_Plateau + stabilité · **rec_score** = robustesse globale · clique sur une ligne pour pré-remplir le backtest_"),
+                best_params_table,
+            ]))
+
+    return (best_params_table,)
 
 
 @app.cell
@@ -610,7 +696,7 @@ def _section6_heatmaps(
 
     heatmap_click = _heatmap_widget  # utilisé par la section backtest
     mo.output.replace(mo.vstack([
-        mo.md("## 6. Heatmaps"),
+        mo.md("## 7. Heatmaps"),
         mo.ui.plotly(_fig_global),
         _heatmap_widget if _heatmap_widget is not None else mo.callout(mo.md("Aucun score disponible pour cette paire."), kind="neutral"),
     ]))
@@ -618,10 +704,26 @@ def _section6_heatmaps(
 
 
 @app.cell
-def _section7_controls(
+def _section7_main_controls(detected_strategy, mo, pairs):
+    bt_pair    = mo.ui.dropdown(options={p: p for p in pairs}, value=pairs[0] if pairs else None, label='Paire')
+    bt_capital = mo.ui.number(value=10000, start=1000, stop=1_000_000, step=1000, label='Capital ($)')
+    run_btn    = mo.ui.button(label='▶ Lancer le backtest', on_click=lambda v: (v or 0) + 1, value=0)
+
+    _strat_label = 'RAM DCA' if detected_strategy == 'ram' else 'Keltner Channel'
+
+    mo.output.replace(mo.vstack([
+        mo.md("## 8. Backtest final interactif"),
+        mo.callout(mo.md(f"Stratégie détectée depuis le pickle : **{_strat_label}**"), kind="info"),
+        mo.hstack([bt_pair, bt_capital, run_btn], justify="start", gap=2),
+    ]))
+    return bt_capital, bt_pair, run_btn
+
+
+@app.cell
+def _section7_param_controls(
+    best_params_table,
     combo_scores,
     detected_params,
-    detected_strategy,
     heatmap_click,
     heatmap_pair,
     heatmap_x,
@@ -632,7 +734,8 @@ def _section7_controls(
     pd,
     valid_combos,
 ):
-    # Trouver la meilleure combo par défaut
+    """Contrôles de paramètres — se re-run quand best_params_table change (auto-fill)."""
+    # Meilleure combo valide par défaut
     _best_pair  = pairs[0] if pairs else None
     _best_combo = None
     _best_score = -np.inf
@@ -648,53 +751,46 @@ def _section7_controls(
 
     _def = dict(zip(detected_params, _best_combo if isinstance(_best_combo, tuple) else ([_best_combo] if _best_combo else [])))
 
-    # Override depuis le clic heatmap
-    if heatmap_click is not None and heatmap_click.value:
+    # Override prioritaire : sélection dans le tableau best_params
+    if best_params_table is not None and len(best_params_table.value) > 0:
+        _row = best_params_table.value.iloc[0].to_dict()
+        for _param in detected_params:
+            if _param in _row:
+                _def[_param] = _row[_param]
+    # Sinon override depuis le clic heatmap
+    elif heatmap_click is not None and heatmap_click.value:
         try:
             _pts = heatmap_click.value.get('points', [])
             if _pts:
                 _def[heatmap_x.value] = float(_pts[0].get('x', 0))
                 _def[heatmap_y.value] = float(_pts[0].get('y', 0))
-                _best_pair = heatmap_pair.value
         except Exception:
             pass
 
-    bt_pair = mo.ui.dropdown(options={p: p for p in pairs}, value=_best_pair or pairs[0], label='Paire')
     bt_ma   = mo.ui.number(value=int(_def.get('ma_window', 20)), start=5, stop=500, step=1, label='ma_window')
-    run_btn = mo.ui.button(label='Lancer le backtest', on_click=lambda v: (v or 0) + 1, value=0)
-
-    # Contrôles spécifiques à chaque stratégie
-    if detected_strategy == 'ram':
-        bt_env = mo.ui.number(value=float(_def.get('env_pct', 0.03)), start=0.005, stop=0.30, step=0.005, label='env_pct')
-        bt_sl  = mo.ui.number(value=float(_def.get('sl_pct',  0.05)), start=0.005, stop=0.20, step=0.005, label='sl_pct')
-        _inputs = mo.hstack([bt_pair, bt_ma, bt_env, bt_sl, run_btn], justify="start", gap=2)
-        bt_atrw = None; bt_atrm = None
-    else:
-        bt_atrw = mo.ui.number(value=int(_def.get('atr_window', 10)),   start=5, stop=500,  step=1,   label='atr_window')
-        bt_atrm = mo.ui.number(value=float(_def.get('atr_mult', 2.0)),  start=0.5, stop=20, step=0.5, label='atr_mult')
-        bt_sl   = mo.ui.number(value=float(_def.get('sl_stop', 0.04)),  start=0.01, stop=0.5, step=0.01, label='sl_stop')
-        bt_env  = None
-        _inputs = mo.hstack([bt_pair, bt_ma, bt_atrw, bt_atrm, bt_sl, run_btn], justify="start", gap=2)
+    bt_env  = mo.ui.number(value=float(_def.get('env_pct', 0.03)), start=0.005, stop=0.30, step=0.005, label='env_pct (RAM)')
+    bt_sl   = mo.ui.number(value=float(_def.get('sl_pct', _def.get('sl_stop', 0.05))), start=0.005, stop=0.30, step=0.005, label='sl_pct / sl_stop')
+    bt_atrw = mo.ui.number(value=int(_def.get('atr_window', 10)), start=5, stop=500, step=1, label='atr_window (KC)')
+    bt_atrm = mo.ui.number(value=float(_def.get('atr_mult', 2.0)), start=0.5, stop=20.0, step=0.5, label='atr_mult (KC)')
 
     mo.output.replace(mo.vstack([
-        mo.md("## 7. Backtest final interactif"),
-        mo.md(f"_Stratégie : `{detected_strategy}` · pré-rempli depuis la meilleure combo valide_"),
-        _inputs,
+        mo.hstack([bt_ma, bt_env, bt_sl, bt_atrw, bt_atrm], justify="start", gap=2),
+        mo.callout(mo.md("**env_pct** et **sl_pct** sont pour RAM · **atr_window / atr_mult** pour Keltner · clique une ligne dans §6 pour auto-remplir"), kind="info"),
     ]))
-    return bt_atrm, bt_atrw, bt_env, bt_ma, bt_pair, bt_sl, run_btn
+    return bt_atrm, bt_atrw, bt_env, bt_ma, bt_sl
 
 
 @app.cell
 def _section7_backtest(
     bt_atrm,
     bt_atrw,
+    bt_capital,
     bt_env,
     bt_ma,
     bt_pair,
     bt_sl,
     detected_strategy,
     file_info,
-    go,
     mo,
     os,
     pd,
@@ -702,7 +798,7 @@ def _section7_backtest(
     vbt,
 ):
     if not run_btn.value:
-        mo.stop(True, mo.callout(mo.md("Clique sur **Lancer le backtest** pour démarrer."), kind="neutral"))
+        mo.stop(True, mo.callout(mo.md("Clique sur **▶ Lancer le backtest** pour démarrer."), kind="neutral"))
 
     mo.output.replace(mo.callout(mo.md("Backtest en cours..."), kind="info"))
 
@@ -710,16 +806,31 @@ def _section7_backtest(
     if '.' not in _sys.path:
         _sys.path.insert(0, '.')
 
-    try:
-        _pair = bt_pair.value
+    import matplotlib as _mpl
+    _mpl.use('Agg')
+    import matplotlib.pyplot as _plt
+    import matplotlib.dates as _mdates
+    import io as _io
+    import base64 as _b64
 
-        # Trouver exchange + tf depuis file_info
+    def _fig_to_html(fig):
+        buf = _io.BytesIO()
+        fig.savefig(buf, format='png', dpi=130, bbox_inches='tight')
+        buf.seek(0)
+        b64 = _b64.b64encode(buf.read()).decode()
+        return mo.Html(f'<img src="data:image/png;base64,{b64}" style="width:100%;max-width:1400px"/>')
+
+    try:
+        _pair     = bt_pair.value
+        # Stratégie toujours déduite du pickle chargé (detected_strategy),
+        # le dropdown bt_strategy sert uniquement d'override explicite
+        _strategy = detected_strategy
+        _init_cap = bt_capital.value
+
         _info     = file_info.get(_pair)
-        _strategy = _info[0] if _info else detected_strategy
         _tf       = _info[2] if _info else '5m'
         _exchange = _info[3] if _info else 'lighter'
 
-        # Chercher le CSV : d'abord {pair}.csv puis {pair}USDT.csv
         _data = None
         for _suf in ('.csv', 'USDT.csv'):
             _path = f'data/raw/{_exchange}/{_tf}/{_pair}{_suf}'
@@ -735,41 +846,92 @@ def _section7_backtest(
         if _strategy == 'ram':
             from src.strategies.ram_dca import run_backtest as _rb
             _pf = _rb(_data, int(bt_ma.value), [float(bt_env.value)], [1.0], float(bt_sl.value))
-
-            _ma_line = vbt.MA.run(_data['close'], window=int(bt_ma.value)).ma
-            _upper   = _ma_line * (1 + float(bt_env.value))
-            _lower   = _ma_line * (1 - float(bt_env.value))
-            _band_label = f'env={float(bt_env.value)*100:.1f}%'
+            _band_label = f'RAM DCA · ma={bt_ma.value} · env={float(bt_env.value)*100:.1f}% · sl={float(bt_sl.value)*100:.0f}%'
         else:
             from src.strategies.keltner import run_backtest as _rb
             _pf = _rb(_data, int(bt_ma.value), int(bt_atrw.value), float(bt_atrm.value), float(bt_sl.value), size=1)
+            _band_label = f'Keltner · ma={bt_ma.value} · atr_w={bt_atrw.value} · mult={bt_atrm.value} · sl={float(bt_sl.value)*100:.0f}%'
 
-            _ma_line = vbt.MA.run(_data['close'], window=int(bt_ma.value), wtype='Exp').ma
-            _atr     = vbt.ATR.run(_data['high'], _data['low'], _data['close'], window=int(bt_atrw.value)).atr
-            _upper   = _ma_line + float(bt_atrm.value) * _atr
-            _lower   = _ma_line - float(bt_atrm.value) * _atr
-            _band_label = f'atr_mult={bt_atrm.value}'
-
+        # ── Stats ──────────────────────────────────────────────────────────────
         _stats = _pf.stats(metrics='all', silence_warnings=True)
+        _stats_df = _stats.reset_index()
+        _stats_df.columns = ['Métrique', 'Valeur']
+        def _fmt_stat(x):
+            if not isinstance(x, float) and not hasattr(x, '__float__'):
+                return str(x)
+            try:
+                v = float(x)
+            except Exception:
+                return str(x)
+            import math
+            if math.isnan(v) or math.isinf(v):
+                return str(x)
+            a = abs(v)
+            if a >= 10000:
+                return f'{v:,.0f}'
+            elif a >= 100:
+                return f'{v:,.2f}'
+            elif a >= 1:
+                return f'{v:.4f}'
+            elif a >= 0.0001:
+                return f'{v:.6f}'
+            else:
+                return f'{v:.4e}'
+        _stats_df['Valeur'] = _stats_df['Valeur'].apply(_fmt_stat)
 
-        _fig = _pf.plot()
-        _fig.add_trace(go.Scatter(x=_ma_line.index, y=_ma_line, name='MA',       line=dict(color='yellow', width=1, dash='dot')))
-        _fig.add_trace(go.Scatter(x=_upper.index,   y=_upper,   name='Bande sup', line=dict(color='red',    width=1)))
-        _fig.add_trace(go.Scatter(x=_lower.index,   y=_lower,   name='Bande inf', line=dict(color='green',  width=1)))
-        _fig.update_layout(height=600, template='plotly_dark')
+        # ── Equity curve (scaled to user capital) ─────────────────────────────
+        _equity = _pf.value
+        _init_pf = float(_equity.iloc[0]) if len(_equity) > 0 else 1.0
+        _equity_s = _equity * (_init_cap / _init_pf) if _init_pf != 0 else _equity
+        _peak = _equity_s.cummax()
+        _dd   = (_equity_s - _peak) / _peak * 100  # negative values
 
-        try:
-            _png   = _fig.to_image(format='png', width=1800, height=600, scale=1)
-            _chart = mo.image(src=_png, alt='Backtest chart')
-        except Exception:
-            _chart = mo.ui.plotly(_fig)
+        # ── Chart 1: Capital + Drawdown ────────────────────────────────────────
+        _fig1, _ax1 = _plt.subplots(figsize=(15, 6))
+        _ax1.set_xlabel('Date')
+        _ax1.set_ylabel('Capital ($)', color='darkblue')
+        _ax1.plot(_equity_s.index, _equity_s.values, color='darkblue')
+        _ax1.tick_params(axis='y', labelcolor='darkblue')
+        _ax1.xaxis.set_major_locator(_mdates.MonthLocator(interval=2))
+        _ax1.xaxis.set_major_formatter(_mdates.DateFormatter('%Y-%m'))
+        _ax1.xaxis.set_tick_params(rotation=45)
+        _ax1.grid(True, linestyle='--', linewidth=0.5)
+        _ax2 = _ax1.twinx()
+        _ax2.set_ylabel('Drawdown (%)', color='darkred')
+        _ax2.plot(_dd.index, (-_dd).values, color='darkred', linestyle='--', alpha=0.7)
+        _ax2.tick_params(axis='y', labelcolor='darkred')
+        _fig1.tight_layout()
+        _plt.title(f'Évolution du Capital & Drawdown — {_pair}')
+        _fig1.legend(['Capital', 'Drawdown (%)'], loc='upper left', bbox_to_anchor=(0.08, 0.92))
+        _cap_html = _fig_to_html(_fig1)
+        _plt.close(_fig1)
+
+        # ── Chart 2: Monthly returns ───────────────────────────────────────────
+        _monthly = _equity_s.resample('ME').last().pct_change().fillna(0) * 100
+        _fig2, _ax = _plt.subplots(figsize=(14, 5))
+        _mcolors = ['#247B47' if x > 0 else '#C71A1A' for x in _monthly.values]
+        _bars = _ax.bar(_monthly.index.strftime('%Y-%m'), _monthly.values, color=_mcolors)
+        _ax.axhline(0, color='gray', linewidth=0.8)
+        _ax.grid(True, linestyle='--', linewidth=0.5)
+        _plt.xticks(rotation=45, ha='right')
+        _plt.title(f'Rendements Mensuels (%) — {_pair}')
+        _plt.ylabel('%')
+        for _bar in _bars:
+            _y = _bar.get_height()
+            _pos = _y + 0.5 if _y >= 0 else _y - 0.5
+            _ax.text(_bar.get_x() + _bar.get_width() / 2, _pos, f'{_y:.1f}%', va='center', ha='center', fontsize=8)
+        _fig2.tight_layout()
+        _mret_html = _fig_to_html(_fig2)
+        _plt.close(_fig2)
 
         mo.output.replace(mo.vstack([
-            mo.callout(mo.md(f"Backtest **in-sample** · `{_strategy}` · **{len(_data):,}** bougies · {_band_label}"), kind="warn"),
-            mo.md("### Stats"),
-            mo.ui.table(pd.DataFrame({'Métrique': _stats.index, 'Valeur': _stats.values}), selection=None),
-            mo.md("### Chart"),
-            _chart,
+            mo.callout(mo.md(f"**In-sample** · {_band_label} · **{len(_data):,}** bougies · capital={_init_cap:,}$"), kind="warn"),
+            mo.md("#### Stats complètes"),
+            mo.ui.table(_stats_df, selection=None),
+            mo.md("---\n#### Évolution du capital & Drawdown"),
+            _cap_html,
+            mo.md("---\n#### Rendements mensuels"),
+            _mret_html,
         ]))
 
     except Exception as _e:
