@@ -15,30 +15,41 @@ echo "│              BTYZ Launcher              │"
 echo "├─────────────────────────────────────────┤"
 echo "│  1) Analyse (walk-forward results)      │"
 echo "│  2) CVD Explorer                        │"
-echo "│  3) Optimisation (opti.py)              │"
-echo "│  4) RAM DCA — HYPE Lighter              │"
-echo "│  5) Analyse (ancienne version)          │"
+echo "│  3) Optimisation Keltner (opti.py)      │"
+echo "│  4) Optimisation RAM DCA (opti_ram.py)  │"
+echo "│  5) RAM DCA — HYPE Lighter (marimo)     │"
+echo "│  6) Analyse (ancienne version)          │"
 echo "└─────────────────────────────────────────┘"
 echo ""
-read -p "  Choix [1-5] : " CHOICE
+read -p "  Choix [1-6] : " CHOICE
 
 case "$CHOICE" in
-    1) MODE="analyse"  ;;
-    2) MODE="cvd"      ;;
-    3) MODE="opti"     ;;
-    4) MODE="ram"      ;;
-    5) MODE="old"      ;;
+    1) MODE="analyse"   ;;
+    2) MODE="cvd"       ;;
+    3) MODE="opti"      ;;
+    4) MODE="opti_ram"  ;;
+    5) MODE="ram"       ;;
+    6) MODE="old"       ;;
     *) echo "Choix invalide. Lancement de l'analyse par défaut."
-       MODE="analyse"  ;;
+       MODE="analyse"   ;;
 esac
 
 # ── Mode opti : pas de marimo ────────────────────────────────────────────────
 if [ "$MODE" = "opti" ]; then
     echo ""
-    echo "Lancement de l'optimisation..."
+    echo "Lancement de l'optimisation Keltner..."
     echo "(Ctrl+C pour arrêter)"
     echo ""
     .venv/bin/python src/opti.py
+    exit 0
+fi
+
+if [ "$MODE" = "opti_ram" ]; then
+    echo ""
+    echo "Lancement de l'optimisation RAM DCA..."
+    echo "(Ctrl+C pour arrêter)"
+    echo ""
+    .venv/bin/python src/opti_ram.py
     exit 0
 fi
 
