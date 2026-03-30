@@ -56,9 +56,9 @@ from src.ml.train_xgb import make_wf_splits
 # ── Config ────────────────────────────────────────────────────────────────────
 SEQ_LEN      = 90      # bougies de contexte (même durée que l'horizon)
 HORIZON      = 90      # bougies à prédire
-BATCH_SIZE   = 512
+BATCH_SIZE   = 4096   # VRAM dispo : 20GB libres → gros batches = GPU saturé
 EPOCHS       = 50
-HIDDEN_SIZE  = 128
+HIDDEN_SIZE  = 256    # modèle plus large pour remplir les tensor cores
 N_LAYERS     = 2
 DROPOUT      = 0.3
 LR           = 1e-3
@@ -207,17 +207,19 @@ def train_lstm_rr(df, seq_len=SEQ_LEN, horizon=HORIZON, force=False):
             yg_te = yg_te[mask_te]
             yl_te = yl_te[mask_te]
 
+            # ── Données entières sur GPU (évite transfers CPU→GPU par batch) ──
+            X_tr_gpu  = torch.tensor(X_tr,  device=device)
+            yg_tr_gpu = torch.tensor(yg_tr, device=device)
+            yl_tr_gpu = torch.tensor(yl_tr, device=device)
+
             # ── Modèle ────────────────────────────────────────────────────────
             model     = build_model(len(feat_cols), device)
             optimizer = torch.optim.Adam(model.parameters(), lr=LR)
             criterion = nn.MSELoss()
+            scaler    = torch.amp.GradScaler('cuda')   # mixed precision fp16
 
-            dataset = TensorDataset(
-                torch.tensor(X_tr, device=device),
-                torch.tensor(yg_tr, device=device),
-                torch.tensor(yl_tr, device=device),
-            )
-            loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+            dataset = TensorDataset(X_tr_gpu, yg_tr_gpu, yl_tr_gpu)
+            loader  = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
             best_loss = float('inf')
             no_imp    = 0
@@ -227,13 +229,20 @@ def train_lstm_rr(df, seq_len=SEQ_LEN, horizon=HORIZON, force=False):
                 epoch_loss = 0.0
                 for xb, yg_b, yl_b in loader:
                     optimizer.zero_grad()
-                    gain_pred, loss_pred = model(xb)
-                    loss = criterion(gain_pred, yg_b) + criterion(loss_pred, yl_b)
-                    loss.backward()
+                    with torch.amp.autocast('cuda', dtype=torch.float16):
+                        gain_pred, loss_pred = model(xb)
+                        loss = criterion(gain_pred, yg_b) + criterion(loss_pred, yl_b)
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
                     nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optimizer.step()
+                    scaler.step(optimizer)
+                    scaler.update()
                     epoch_loss += loss.item()
                 epoch_loss /= len(loader)
+
+            # Libère la mémoire GPU du fold précédent
+            del X_tr_gpu, yg_tr_gpu, yl_tr_gpu
+            torch.cuda.empty_cache()
 
                 if epoch_loss < best_loss - 1e-6:
                     best_loss = epoch_loss
