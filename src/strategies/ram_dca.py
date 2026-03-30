@@ -150,7 +150,7 @@ def ram_dca_nb(high, low, close, ma, upper_envs, lower_envs, allocations, sl_pct
 
 
 def run_backtest(data, ma_window, envelope_levels, allocations, sl_pct,
-                 ohlc4=False, leverage=1.0):
+                 ohlc4=False, leverage=1.0, freq=None):
     """
     Backtest RAM DCA multi-niveaux.
 
@@ -196,6 +196,14 @@ def run_backtest(data, ma_window, envelope_levels, allocations, sl_pct,
     size_s  = pd.Series(target_size, index=data.index)
     price_s = pd.Series(exec_price,  index=data.index)
 
+    # Auto-détecter la fréquence depuis l'index si non fournie
+    if freq is None:
+        _delta = data.index.to_series().diff().dropna()
+        _median_sec = _delta.dt.total_seconds().median()
+        _freq_map = {60: '1min', 180: '3min', 300: '5min', 900: '15min',
+                     1800: '30min', 3600: '1h', 7200: '2h', 14400: '4h', 86400: '1D'}
+        freq = _freq_map.get(int(_median_sec), f'{int(_median_sec)}s')
+
     pf = vbt.Portfolio.from_orders(
         close=data['close'],
         size=size_s,
@@ -204,6 +212,6 @@ def run_backtest(data, ma_window, envelope_levels, allocations, sl_pct,
         init_cash=INIT_CASH,
         leverage=leverage,
         fees=FEES,
-        freq='1min',
+        freq=freq,
     )
     return pf
