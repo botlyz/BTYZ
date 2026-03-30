@@ -111,9 +111,23 @@ def _imports():
         z = (sr_max - sr_0) / sigma
         return float(sp_stats.norm.cdf(z))
 
+    # Affichage lisible : pas de notation scientifique, 4 chiffres significatifs
+    pd.set_option('display.float_format', '{:.4g}'.format)
+
+    def fmt_params(params_dict):
+        """Arrondit les valeurs de params pour affichage humain."""
+        out = {}
+        for k, v in params_dict.items():
+            if k == 'ma_window':
+                out[k] = int(round(v))
+            else:
+                out[k] = round(float(v), 4)
+        return out
+
     return (
         PARAMS_BY_STRATEGY,
         compute_dsr,
+        fmt_params,
         get_param_cols,
         glob_mod,
         go,
@@ -342,6 +356,7 @@ def _section2(combo_scores, global_stats_df, go, mo, pairs, valid_combos):
 def _section3(
     combo_scores,
     detected_params,
+    fmt_params,
     mo,
     np,
     pairs,
@@ -375,7 +390,7 @@ def _section3(
             _ret_cv = abs(float(_ret.std()) / _ret_mean) if _ret_mean != 0 else np.inf
 
             _score = float(_scores.loc[_combo]) if _combo in _scores.index else np.nan
-            _params = dict(zip(detected_params, _combo if isinstance(_combo, tuple) else [_combo]))
+            _params = fmt_params(dict(zip(detected_params, _combo if isinstance(_combo, tuple) else [_combo])))
 
             _rows.append({
                 'paire': _pair,
@@ -403,7 +418,7 @@ def _section3(
 
 
 @app.cell
-def _section4(combo_scores, detected_params, mo, np, pairs, pd, valid_combos):
+def _section4(combo_scores, detected_params, fmt_params, mo, np, pairs, pd, valid_combos):
     _rows = []
     for _pair in pairs:
         _vcs = valid_combos.get(_pair)
@@ -415,7 +430,7 @@ def _section4(combo_scores, detected_params, mo, np, pairs, pd, valid_combos):
         _grid = {p: sorted(_scores.index.get_level_values(p).unique()) for p in detected_params}
 
         for _combo in _vcs:
-            _params = dict(zip(detected_params, _combo if isinstance(_combo, tuple) else [_combo]))
+            _params = fmt_params(dict(zip(detected_params, _combo if isinstance(_combo, tuple) else [_combo])))
             _combo_score = float(_scores.loc[_combo]) if _combo in _scores.index else np.nan
 
             # Trouver les voisins (±1 step sur chaque axe)
