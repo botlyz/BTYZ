@@ -243,13 +243,17 @@ def train_lstm_rr(df, seq_len=SEQ_LEN, horizon=HORIZON, force=False):
                     if no_imp >= PATIENCE:
                         break
 
-            # ── Évaluation ────────────────────────────────────────────────────
+            # ── Évaluation (par chunks pour éviter OOM) ───────────────────────
             model.eval()
+            gain_parts, loss_parts = [], []
             with torch.no_grad():
-                X_te_t = torch.tensor(X_te, device=device)
-                gain_p, loss_p = model(X_te_t)
-                gain_p = gain_p.cpu().numpy()
-                loss_p = loss_p.cpu().numpy()
+                for _start in range(0, len(X_te), BATCH_SIZE):
+                    xb = torch.tensor(X_te[_start:_start + BATCH_SIZE], device=device)
+                    gp, lp = model(xb)
+                    gain_parts.append(gp.cpu().numpy())
+                    loss_parts.append(lp.cpu().numpy())
+            gain_p = np.concatenate(gain_parts)
+            loss_p = np.concatenate(loss_parts)
 
             # R/R prédit (gain forcément >0, loss forcément <0)
             gain_p_c = np.clip(gain_p, 0, None)
