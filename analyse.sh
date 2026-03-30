@@ -16,16 +16,18 @@ echo "├───────────────────────�
 echo "│  1) Analyse (walk-forward results)      │"
 echo "│  2) CVD Explorer                        │"
 echo "│  3) Optimisation (opti.py)              │"
-echo "│  4) Analyse (ancienne version)          │"
+echo "│  4) RAM DCA — HYPE Lighter              │"
+echo "│  5) Analyse (ancienne version)          │"
 echo "└─────────────────────────────────────────┘"
 echo ""
-read -p "  Choix [1-4] : " CHOICE
+read -p "  Choix [1-5] : " CHOICE
 
 case "$CHOICE" in
     1) MODE="analyse"  ;;
     2) MODE="cvd"      ;;
     3) MODE="opti"     ;;
-    4) MODE="old"      ;;
+    4) MODE="ram"      ;;
+    5) MODE="old"      ;;
     *) echo "Choix invalide. Lancement de l'analyse par défaut."
        MODE="analyse"  ;;
 esac
@@ -45,6 +47,8 @@ if [ "$MODE" = "old" ]; then
     NB="notebooks/analyse.py"
 elif [ "$MODE" = "cvd" ]; then
     NB="notebooks/cvd_explorer.py"
+elif [ "$MODE" = "ram" ]; then
+    NB="notebooks/ram_dca_lighter.py"
 else
     NB="notebooks/analyse_full.py"
 fi
