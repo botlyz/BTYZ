@@ -48,17 +48,24 @@ def _load(mo, os, pd, pickle, pkl_select):
     preds = result['preds_oos']
 
     # ── Détection du type de modèle ───────────────────────────────────────────
+    cfg = result.get('config', {})
     if isinstance(preds, pd.DataFrame) and 'rr_pred' in preds.columns:
-        model_type   = 'rr'
-        signal_vals  = preds['rr_pred']
-        config_str   = f"horizon={result.get('horizon','?')}m"
-        type_str     = "R/R dynamique"
+        model_type  = 'rr'
+        signal_vals = preds['rr_pred']
+        config_str  = f"horizon={result.get('horizon','?')}m"
+        type_str    = "R/R dynamique"
+    elif isinstance(cfg.get('tp', ''), str) and 'ATR' in str(cfg.get('tp', '')):
+        model_type  = 'atr'
+        signal_vals = preds
+        _rr         = result.get('rr', 2)
+        _be         = 1.0 / (_rr + 1.0)
+        config_str  = f"RR={_rr} · TP={_rr}×ATR · SL=1×ATR · BE={_be:.0%} · max={cfg.get('max_bars',60)}m"
+        type_str    = f"ATR Barrier (RR={_rr})"
     else:
-        model_type   = 'classification'
-        signal_vals  = preds
-        cfg          = result.get('config', {})
-        config_str   = f"TP={cfg.get('tp',0.015)*100:.1f}% · SL={cfg.get('sl',0.009)*100:.1f}% · max={cfg.get('max_bars',30)}m"
-        type_str     = "Classification (Triple Barrier)"
+        model_type  = 'classification'
+        signal_vals = preds
+        config_str  = f"TP={cfg.get('tp',0.015)*100:.1f}% · SL={cfg.get('sl',0.009)*100:.1f}% · max={cfg.get('max_bars',30)}m"
+        type_str    = "Classification (Triple Barrier)"
 
     results_df = result['results_df']
 
@@ -204,6 +211,11 @@ def _threshold_controls(mo, model_type):
         label='Taille position (% capital)',
         show_value=True,
     )
+    fees_slider = mo.ui.slider(
+        0.0, 0.1, step=0.01, value=0.0,
+        label='Frais % (0 = Lighter)',
+        show_value=True,
+    )
 
     run_btn = mo.ui.button(
         label    = '▶ Lancer le backtest',
@@ -213,13 +225,13 @@ def _threshold_controls(mo, model_type):
 
     mo.vstack([
         mo.md(f"### Paramètres backtest\n_{_hint}_"),
-        mo.hstack([threshold_slider, tp_slider, sl_slider, size_slider, run_btn]),
+        mo.hstack([threshold_slider, tp_slider, sl_slider, size_slider, fees_slider, run_btn]),
     ])
-    return run_btn, sl_slider, size_slider, threshold_slider, tp_slider
+    return fees_slider, run_btn, sl_slider, size_slider, threshold_slider, tp_slider
 
 
 @app.cell
-def _backtest(base64, capital_input, io, mo, model_type, np, os, pd, pkl_select, plt, mdates, preds, result, results_df, run_btn, sl_slider, size_slider, threshold_slider, tp_slider):
+def _backtest(base64, capital_input, fees_slider, io, mo, model_type, np, os, pd, pkl_select, plt, mdates, preds, result, results_df, run_btn, sl_slider, size_slider, threshold_slider, tp_slider):
     if not run_btn.value:
         mo.stop(True, mo.callout(mo.md("Clique sur **▶ Lancer le backtest** pour démarrer."), kind="neutral"))
 
@@ -267,8 +279,28 @@ def _backtest(base64, capital_input, io, mo, model_type, np, os, pd, pkl_select,
         _preds_dedup = preds[~preds.index.duplicated(keep='last')] if isinstance(preds, pd.Series) \
                        else preds[~preds.index.duplicated(keep='last')]
         _pos_size = size_slider.value / 100.0
+        _fees     = fees_slider.value / 100.0
 
-        if model_type == 'classification':
+        if model_type == 'atr':
+            # ── ATR dynamique : TP = rr×ATR, SL = 1×ATR ──────────────────────
+            _rr      = result.get('rr', 2)
+            _atr_per = result.get('atr_period', 14)
+            _pdf2    = pd.read_csv('data/raw/binance/um/1m/BTCUSDT.csv', low_memory=False)
+            _pdf2['date'] = pd.to_datetime(_pdf2['date'], unit='ms', utc=True)
+            _pdf2 = _pdf2.set_index('date').sort_index()
+            _high, _low = _pdf2['high'].astype(float), _pdf2['low'].astype(float)
+            _prev = _close.shift(1)
+            _tr   = pd.concat([_high-_low, (_high-_prev).abs(), (_low-_prev).abs()], axis=1).max(axis=1)
+            _atr  = _tr.rolling(_atr_per).mean()
+            _atr_pct = (_atr / _close).fillna(method='bfill')
+            _tp_stop = (_rr * _atr_pct).reindex(_close.index).fillna(_rr * _atr_pct.median())
+            _sl_stop = (_atr_pct).reindex(_close.index).fillna(_atr_pct.median())
+            _proba   = _preds_dedup.reindex(_close.index, fill_value=0.0)
+            _entries = (_proba > _threshold)
+            _be      = 1.0 / (_rr + 1.0)
+            _label_bt = (f"ATR RR={_rr} · seuil={_threshold:.2f}"
+                         f" · TP={_rr}×ATR · SL=1×ATR · BE={_be:.0%}")
+        elif model_type == 'classification':
             _tp_stop = tp_slider.value / 100.0
             _sl_stop = sl_slider.value / 100.0
             _be_pct  = _sl_stop / (_tp_stop + _sl_stop) * 100
@@ -298,7 +330,7 @@ def _backtest(base64, capital_input, io, mo, model_type, np, os, pd, pkl_select,
             exits       = pd.Series(False, index=_close.index),
             sl_stop     = _sl_stop,
             tp_stop     = _tp_stop,
-            fees        = 0.0004,
+            fees        = _fees,
             freq        = '1T',
             init_cash   = _init_cap,
             size        = _pos_size,
