@@ -163,15 +163,12 @@ def make_max_gain_loss_label(
 # ── 4. ATR Barrier (TP = rr×ATR, SL = 1×ATR) ────────────────────────────────
 
 @njit
-def _atr_barrier_nb(close_arr, atr_pct_arr, rr, max_bars):
+def _atr_barrier_nb(close_arr, atr_pct_arr, rr, max_bars, is_long=True):
     """
     Kernel numba — Triple Barrier avec niveaux ATR dynamiques.
-
-    TP = entry × (1 + rr  × ATR%)
-    SL = entry × (1 - 1.0 × ATR%)
-
-    Break-even = 1 / (rr + 1)
-      rr=1 → 50%  |  rr=2 → 33%  |  rr=3 → 25%  |  rr=5 → 17%
+    
+    is_long=True  : TP = entry + rr*ATR, SL = entry - 1*ATR
+    is_long=False : TP = entry - rr*ATR, SL = entry + 1*ATR
     """
     n = len(close_arr)
     labels = np.zeros(n, dtype=np.int8)
@@ -179,17 +176,31 @@ def _atr_barrier_nb(close_arr, atr_pct_arr, rr, max_bars):
         if np.isnan(atr_pct_arr[i]) or atr_pct_arr[i] <= 0:
             continue
         entry = close_arr[i]
-        upper = entry * (1.0 + rr * atr_pct_arr[i])
-        lower = entry * (1.0 - atr_pct_arr[i])
+        
+        if is_long:
+            upper = entry * (1.0 + rr * atr_pct_arr[i])
+            lower = entry * (1.0 - 1.0 * atr_pct_arr[i])
+        else:
+            upper = entry * (1.0 + 1.0 * atr_pct_arr[i]) # SL
+            lower = entry * (1.0 - rr * atr_pct_arr[i])  # TP
+            
         end   = min(i + max_bars, n - 1)
         for j in range(i + 1, end + 1):
             price = close_arr[j]
-            if price >= upper:
-                labels[i] = 1
-                break
-            elif price <= lower:
-                labels[i] = -1
-                break
+            if is_long:
+                if price >= upper:
+                    labels[i] = 1
+                    break
+                elif price <= lower:
+                    labels[i] = -1
+                    break
+            else: # short
+                if price <= lower: # TP pour un short
+                    labels[i] = 1
+                    break
+                elif price >= upper: # SL pour un short
+                    labels[i] = -1
+                    break
     return labels
 
 
@@ -200,6 +211,7 @@ def make_atr_barrier_label(
     rr:         float = 2.0,
     atr_period: int   = 14,
     max_bars:   int   = 60,
+    side:       str   = 'long',
 ) -> pd.Series:
     """
     Triple Barrier avec TP/SL définis par l'ATR courant.
@@ -215,6 +227,8 @@ def make_atr_barrier_label(
         Période ATR (14 par défaut).
     max_bars : int
         Temps maximum en bougies M1.
+    side : str
+        'long' ou 'short'.
     """
     prev_close = close.shift(1)
     tr = pd.concat([
@@ -230,11 +244,86 @@ def make_atr_barrier_label(
         atr_pct,
         float(rr),
         int(max_bars),
+        is_long=(side.lower() == 'long')
     )
     be = 1.0 / (rr + 1.0)
     return pd.Series(
         labels, index=close.index,
-        name=f'atr_rr{rr}_t{max_bars}_be{be:.0%}',
+        name=f'atr_{side}_rr{rr}_t{max_bars}_be{be:.0%}',
+    )
+
+
+# ── 5. ATR 3 classes : +1=long / -1=short / 0=neutre ────────────────────────
+
+@njit
+def _atr_3class_nb(close_arr, atr_pct_arr, rr, max_bars):
+    """
+    Pour chaque bougie, regarde les `max_bars` suivantes :
+      +1 : prix monte rr×ATR avant de descendre 1×ATR  → bon long
+      -1 : prix descend rr×ATR avant de monter 1×ATR   → bon short
+       0 : ni l'un ni l'autre                           → neutre
+    """
+    n = len(close_arr)
+    labels = np.zeros(n, dtype=np.int8)
+    for i in range(n - 1):
+        if np.isnan(atr_pct_arr[i]) or atr_pct_arr[i] <= 0:
+            continue
+        entry    = close_arr[i]
+        tp_long  = entry * (1.0 + rr  * atr_pct_arr[i])
+        sl_long  = entry * (1.0 - 1.0 * atr_pct_arr[i])
+        tp_short = entry * (1.0 - rr  * atr_pct_arr[i])
+        sl_short = entry * (1.0 + 1.0 * atr_pct_arr[i])
+        end = min(i + max_bars, n - 1)
+        for j in range(i + 1, end + 1):
+            price = close_arr[j]
+            if price >= tp_long:
+                labels[i] = 1
+                break
+            elif price <= tp_short:
+                labels[i] = -1
+                break
+            elif price <= sl_long or price >= sl_short:
+                # SL commun des deux côtés → neutre
+                break
+    return labels
+
+
+def make_atr_3class_label(
+    close:      pd.Series,
+    high:       pd.Series,
+    low:        pd.Series,
+    rr:         float = 2.0,
+    atr_period: int   = 14,
+    max_bars:   int   = 60,
+) -> pd.Series:
+    """
+    Label 3 classes symétrique pour un modèle long/short/neutre unifié.
+
+      +1 : bon long  (monte rr×ATR avant de descendre 1×ATR)
+      -1 : bon short (descend rr×ATR avant de monter 1×ATR)
+       0 : neutre    (ni l'un ni l'autre dans max_bars)
+
+    Break-even identique des deux côtés : 1/(rr+1)
+    """
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    atr     = tr.rolling(atr_period).mean()
+    atr_pct = (atr / close).values.astype(np.float64)
+
+    labels = _atr_3class_nb(
+        close.values.astype(np.float64),
+        atr_pct,
+        float(rr),
+        int(max_bars),
+    )
+    be = 1.0 / (rr + 1.0)
+    return pd.Series(
+        labels, index=close.index,
+        name=f'atr3c_rr{rr}_t{max_bars}_be{be:.0%}',
     )
 
 
