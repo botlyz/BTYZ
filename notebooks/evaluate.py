@@ -220,20 +220,23 @@ def _backtest(base64, capital_input, io, mo, model_type, np, os, pd, pkl_select,
         _close = _pdf['close'].astype(float)
 
         # ── Génération des signaux ────────────────────────────────────────────
+        # Dédupliquer l'index (doublons possibles entre folds walk-forward)
         if model_type == 'classification':
             _tp    = _config.get('tp',       0.015)
             _sl    = _config.get('sl',       0.009)
-            _proba = preds.reindex(_close.index, fill_value=0.0)
+            _preds_dedup = preds[~preds.index.duplicated(keep='last')]
+            _proba = _preds_dedup.reindex(_close.index, fill_value=0.0)
             _entries = (_proba > _threshold)
             _tp_stop = _tp
             _sl_stop = _sl
             _label_bt = (f"XGB Triple Barrier · seuil={_threshold:.2f}"
                          f" · TP={_tp*100:.1f}% · SL={_sl*100:.1f}%")
         else:
-            _rr_pred    = preds['rr_pred'].reindex(_close.index, fill_value=0.0)
+            _preds_dedup = preds[~preds.index.duplicated(keep='last')]
+            _rr_pred    = _preds_dedup['rr_pred'].reindex(_close.index, fill_value=0.0)
             _entries    = (_rr_pred > _threshold)
-            _gain_pred  = preds['gain_pred'].reindex(_close.index)
-            _loss_pred  = preds['loss_pred'].abs().reindex(_close.index)
+            _gain_pred  = _preds_dedup['gain_pred'].reindex(_close.index)
+            _loss_pred  = _preds_dedup['loss_pred'].abs().reindex(_close.index)
             _tp_stop    = max(float(_gain_pred[_entries].median()), 0.005)
             _sl_stop    = max(float(_loss_pred[_entries].median()), 0.003)
             _label_bt   = (f"R/R dynamique · seuil={_threshold:.1f}"
@@ -321,6 +324,24 @@ def _backtest(base64, capital_input, io, mo, model_type, np, os, pd, pkl_select,
         except Exception:
             _kind_sh   = "neutral"
 
+        # ── Tableau rendements mensuels ───────────────────────────────────────
+        _mret_df = pd.DataFrame({
+            'Mois':       _monthly.index.strftime('%Y-%m'),
+            'Rendement (%)': _monthly.values.round(2),
+        })
+
+        # ── Tableau résultats par fold ────────────────────────────────────────
+        _fold_cols = ['fold', 'test_start', 'test_end']
+        if model_type == 'classification':
+            _fold_extra = ['precision', 'tp_rate', 'lift', 'n_signals']
+        else:
+            _fold_extra = ['corr_gain', 'corr_loss', 'corr_rr', 'baseline_rr',
+                           f'n_sig_1.5', f'lift_rr_1.5', f'n_sig_2.0', f'lift_rr_2.0']
+        _fold_show = [c for c in _fold_cols + _fold_extra if c in results_df.columns]
+        _fold_df   = results_df[_fold_show].copy()
+        for _c in _fold_df.select_dtypes('float').columns:
+            _fold_df[_c] = _fold_df[_c].round(4)
+
         mo.output.replace(mo.vstack([
             mo.callout(
                 mo.md(f"**OOS · {_label_bt}**"
@@ -333,12 +354,16 @@ def _backtest(base64, capital_input, io, mo, model_type, np, os, pd, pkl_select,
                       f" · Trades **{int(_ntrades):,}**"),
                 kind=_kind_sh,
             ),
-            mo.md("#### Stats complètes"),
-            mo.ui.table(_stats_df, selection=None),
             mo.md("---\n#### Évolution du capital & Drawdown"),
             _cap_html,
             mo.md("---\n#### Rendements mensuels"),
             _mret_html,
+            mo.md("#### Rendements mensuels — tableau"),
+            mo.ui.table(_mret_df, selection=None),
+            mo.md("---\n#### Stats VBT complètes"),
+            mo.ui.table(_stats_df, selection=None),
+            mo.md("---\n#### Résultats par fold (walk-forward)"),
+            mo.ui.table(_fold_df, selection=None),
         ]))
 
     except Exception as _e:
