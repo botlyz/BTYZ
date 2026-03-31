@@ -102,7 +102,7 @@ def _quality(base64, io, math, mo, model_type, np, pd, plt, result, results_df, 
 
     # ── Courbe qualité vs seuil ───────────────────────────────────────────────
     _ax2 = _axes[1]
-    if model_type == 'classification':
+    if model_type in ('classification', 'atr'):
         _thrs      = np.arange(0.30, 0.85, 0.05)
         _precs, _ns = [], []
         _labels_oos = result['labels_oos']
@@ -113,9 +113,11 @@ def _quality(base64, io, math, mo, model_type, np, pd, plt, result, results_df, 
                 _precs.append(float(_labels_oos.values[_mask].mean()))
             else:
                 _precs.append(0.0)
-        _ax2.plot(_thrs, _precs, 'steelblue', marker='o', ms=4, label='Précision')
         _base = results_df['tp_rate'].mean()
-        _ax2.axhline(_base, color='red', linestyle='--', alpha=0.7, label=f'baseline tp_rate={_base:.3f}')
+        _be   = results_df['break_even'].mean() if 'break_even' in results_df.columns else _base
+        _ax2.plot(_thrs, _precs, 'steelblue', marker='o', ms=4, label='Précision')
+        _ax2.axhline(_base,  color='orange', linestyle=':',  alpha=0.8, label=f'tp_rate={_base:.3f}')
+        _ax2.axhline(_be,    color='red',    linestyle='--', alpha=0.8, label=f'break-even={_be:.3f}')
         _ax2.set_xlabel('Seuil proba')
         _ax2.set_ylabel('Précision', color='steelblue')
         _ax2b = _ax2.twinx()
@@ -146,18 +148,23 @@ def _quality(base64, io, math, mo, model_type, np, pd, plt, result, results_df, 
     plt.close(_fig)
 
     # ── Tableau numérique ────────────────────────────────────────────────────
-    if model_type == 'classification':
+    if model_type in ('classification', 'atr'):
         _base = results_df['tp_rate'].mean()
-        _quality_df = pd.DataFrame({
-            'Seuil proba':   [f'{t:.2f}' for t in _thrs],
-            'N signaux':     _ns,
-            'Précision':     [round(p, 4) for p in _precs],
-            'Baseline':      round(_base, 4),
-            'Lift':          [round(p - _base, 4) for p in _precs],
-            'Break-even SL=0.9%': '37.5%',
-            'Break-even SL=0.5%': '25.0%',
-            'Break-even SL=0.4%': '21.1%',
-        })
+        _be   = results_df['break_even'].mean() if 'break_even' in results_df.columns else None
+        _row = {
+            'Seuil proba': [f'{t:.2f}' for t in _thrs],
+            'N signaux':   _ns,
+            'Précision':   [round(p, 4) for p in _precs],
+            'Baseline':    round(_base, 4),
+            'Lift':        [round(p - _base, 4) for p in _precs],
+        }
+        if _be is not None:
+            _row['Break-even'] = round(_be, 4)
+            _row['Profitable'] = ['✅' if p > _be else '❌' for p in _precs]
+        else:
+            _row['Break-even SL=0.9%'] = '37.5%'
+            _row['Break-even SL=0.5%'] = '25.0%'
+        _quality_df = pd.DataFrame(_row)
     else:
         _quality_df = pd.DataFrame({
             'Seuil R/R':        [str(t) for t in _thrs_rr],
