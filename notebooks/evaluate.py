@@ -153,14 +153,35 @@ def _threshold_controls(mo, model_type):
             label='Seuil proba entrée',
             show_value=True,
         )
-        _hint = "Proba > X → signal long · TP/SL fixes définis par le label"
+        tp_slider = mo.ui.slider(
+            0.3, 5.0, step=0.1, value=1.5,
+            label='TP (%)',
+            show_value=True,
+        )
+        sl_slider = mo.ui.slider(
+            0.1, 3.0, step=0.1, value=0.9,
+            label='SL (%)',
+            show_value=True,
+        )
+        _be = sl_slider.value / (tp_slider.value + sl_slider.value) * 100
+        _hint = (f"Proba > X → signal long  ·  "
+                 f"Break-even precision = SL/(TP+SL) = **{_be:.1f}%** "
+                 f"(modèle atteint ~25-28%)")
     else:
         threshold_slider = mo.ui.slider(
             1.0, 4.0, step=0.1, value=1.5,
             label='Seuil R/R prédit',
             show_value=True,
         )
+        tp_slider = mo.ui.slider(0.3, 5.0, step=0.1, value=1.5, label='TP (%)', show_value=True)
+        sl_slider = mo.ui.slider(0.1, 3.0, step=0.1, value=0.9, label='SL (%)', show_value=True)
         _hint = "R/R prédit > X → signal long · TP/SL = max_gain/max_loss prédits (médiane)"
+
+    size_slider = mo.ui.slider(
+        1, 100, step=1, value=10,
+        label='Taille position (% capital)',
+        show_value=True,
+    )
 
     run_btn = mo.ui.button(
         label    = '▶ Lancer le backtest',
@@ -170,13 +191,13 @@ def _threshold_controls(mo, model_type):
 
     mo.vstack([
         mo.md(f"### Paramètres backtest\n_{_hint}_"),
-        mo.hstack([threshold_slider, run_btn]),
+        mo.hstack([threshold_slider, tp_slider, sl_slider, size_slider, run_btn]),
     ])
-    return run_btn, threshold_slider
+    return run_btn, sl_slider, size_slider, threshold_slider, tp_slider
 
 
 @app.cell
-def _backtest(base64, capital_input, io, mo, model_type, np, os, pd, pkl_select, plt, mdates, preds, result, run_btn, threshold_slider):
+def _backtest(base64, capital_input, io, mo, model_type, np, os, pd, pkl_select, plt, mdates, preds, result, results_df, run_btn, sl_slider, size_slider, threshold_slider, tp_slider):
     if not run_btn.value:
         mo.stop(True, mo.callout(mo.md("Clique sur **▶ Lancer le backtest** pour démarrer."), kind="neutral"))
 
@@ -221,18 +242,20 @@ def _backtest(base64, capital_input, io, mo, model_type, np, os, pd, pkl_select,
 
         # ── Génération des signaux ────────────────────────────────────────────
         # Dédupliquer l'index (doublons possibles entre folds walk-forward)
+        _preds_dedup = preds[~preds.index.duplicated(keep='last')] if isinstance(preds, pd.Series) \
+                       else preds[~preds.index.duplicated(keep='last')]
+        _pos_size = size_slider.value / 100.0
+
         if model_type == 'classification':
-            _tp    = _config.get('tp',       0.015)
-            _sl    = _config.get('sl',       0.009)
-            _preds_dedup = preds[~preds.index.duplicated(keep='last')]
-            _proba = _preds_dedup.reindex(_close.index, fill_value=0.0)
+            _tp_stop = tp_slider.value / 100.0
+            _sl_stop = sl_slider.value / 100.0
+            _be_pct  = _sl_stop / (_tp_stop + _sl_stop) * 100
+            _proba   = _preds_dedup.reindex(_close.index, fill_value=0.0)
             _entries = (_proba > _threshold)
-            _tp_stop = _tp
-            _sl_stop = _sl
-            _label_bt = (f"XGB Triple Barrier · seuil={_threshold:.2f}"
-                         f" · TP={_tp*100:.1f}% · SL={_sl*100:.1f}%")
+            _label_bt = (f"XGB · seuil={_threshold:.2f}"
+                         f" · TP={_tp_stop*100:.1f}% · SL={_sl_stop*100:.1f}%"
+                         f" · BE={_be_pct:.1f}%")
         else:
-            _preds_dedup = preds[~preds.index.duplicated(keep='last')]
             _rr_pred    = _preds_dedup['rr_pred'].reindex(_close.index, fill_value=0.0)
             _entries    = (_rr_pred > _threshold)
             _gain_pred  = _preds_dedup['gain_pred'].reindex(_close.index)
@@ -256,8 +279,8 @@ def _backtest(base64, capital_input, io, mo, model_type, np, os, pd, pkl_select,
             fees        = 0.0004,
             freq        = '1T',
             init_cash   = _init_cap,
-            size        = 1.0,
-            size_type   = 'value',
+            size        = _pos_size,
+            size_type   = 'percent_of_equity',
         )
 
         # ── Stats ─────────────────────────────────────────────────────────────
