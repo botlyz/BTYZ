@@ -160,6 +160,84 @@ def make_max_gain_loss_label(
     return df
 
 
+# ── 4. ATR Barrier (TP = rr×ATR, SL = 1×ATR) ────────────────────────────────
+
+@njit
+def _atr_barrier_nb(close_arr, atr_pct_arr, rr, max_bars):
+    """
+    Kernel numba — Triple Barrier avec niveaux ATR dynamiques.
+
+    TP = entry × (1 + rr  × ATR%)
+    SL = entry × (1 - 1.0 × ATR%)
+
+    Break-even = 1 / (rr + 1)
+      rr=1 → 50%  |  rr=2 → 33%  |  rr=3 → 25%  |  rr=5 → 17%
+    """
+    n = len(close_arr)
+    labels = np.zeros(n, dtype=np.int8)
+    for i in range(n - 1):
+        if np.isnan(atr_pct_arr[i]) or atr_pct_arr[i] <= 0:
+            continue
+        entry = close_arr[i]
+        upper = entry * (1.0 + rr * atr_pct_arr[i])
+        lower = entry * (1.0 - atr_pct_arr[i])
+        end   = min(i + max_bars, n - 1)
+        for j in range(i + 1, end + 1):
+            price = close_arr[j]
+            if price >= upper:
+                labels[i] = 1
+                break
+            elif price <= lower:
+                labels[i] = -1
+                break
+    return labels
+
+
+def make_atr_barrier_label(
+    close:      pd.Series,
+    high:       pd.Series,
+    low:        pd.Series,
+    rr:         float = 2.0,
+    atr_period: int   = 14,
+    max_bars:   int   = 60,
+) -> pd.Series:
+    """
+    Triple Barrier avec TP/SL définis par l'ATR courant.
+
+    TP = rr × ATR  (break-even = 1/(rr+1))
+    SL =  1 × ATR
+
+    Paramètres
+    ----------
+    rr : float
+        Ratio TP/SL. rr=3 → TP=3×ATR, SL=1×ATR, break-even=25%.
+    atr_period : int
+        Période ATR (14 par défaut).
+    max_bars : int
+        Temps maximum en bougies M1.
+    """
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    atr     = tr.rolling(atr_period).mean()
+    atr_pct = (atr / close).values.astype(np.float64)
+
+    labels = _atr_barrier_nb(
+        close.values.astype(np.float64),
+        atr_pct,
+        float(rr),
+        int(max_bars),
+    )
+    be = 1.0 / (rr + 1.0)
+    return pd.Series(
+        labels, index=close.index,
+        name=f'atr_rr{rr}_t{max_bars}_be{be:.0%}',
+    )
+
+
 # ── Utilitaire : stats des labels ─────────────────────────────────────────────
 
 def label_stats(label: pd.Series) -> None:
