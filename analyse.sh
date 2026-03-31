@@ -19,9 +19,10 @@ echo "│  3) Optimisation Keltner (opti.py)      │"
 echo "│  4) Optimisation RAM DCA (opti_ram.py)  │"
 echo "│  5) RAM DCA — HYPE Lighter (marimo)     │"
 echo "│  6) Analyse (ancienne version)          │"
+echo "│  7) Evaluate ML signals (backtest OOS)  │"
 echo "└─────────────────────────────────────────┘"
 echo ""
-read -p "  Choix [1-6] : " CHOICE
+read -p "  Choix [1-7] : " CHOICE
 
 case "$CHOICE" in
     1) MODE="analyse"   ;;
@@ -30,6 +31,7 @@ case "$CHOICE" in
     4) MODE="opti_ram"  ;;
     5) MODE="ram"       ;;
     6) MODE="old"       ;;
+    7) MODE="evaluate"  ;;
     *) echo "Choix invalide. Lancement de l'analyse par défaut."
        MODE="analyse"   ;;
 esac
@@ -60,6 +62,8 @@ elif [ "$MODE" = "cvd" ]; then
     NB="notebooks/cvd_explorer.py"
 elif [ "$MODE" = "ram" ]; then
     NB="notebooks/ram_dca_lighter.py"
+elif [ "$MODE" = "evaluate" ]; then
+    NB="notebooks/evaluate.py"
 else
     NB="notebooks/analyse_full.py"
 fi
