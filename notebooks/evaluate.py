@@ -100,11 +100,10 @@ def _quality(base64, io, math, mo, model_type, np, pd, plt, result, results_df, 
         _precs, _ns = [], []
         _labels_oos = result['labels_oos']
         for _t in _thrs:
-            _mask = signal_vals > _t
-            _ns.append(_mask.sum())
+            _mask = (signal_vals > _t).values
+            _ns.append(int(_mask.sum()))
             if _mask.sum() > 0:
-                _matched = _labels_oos.reindex(signal_vals[_mask].index)
-                _precs.append(float(_matched.mean()) if len(_matched) > 0 else 0.0)
+                _precs.append(float(_labels_oos.values[_mask].mean()))
             else:
                 _precs.append(0.0)
         _ax2.plot(_thrs, _precs, 'steelblue', marker='o', ms=4, label='Précision')
