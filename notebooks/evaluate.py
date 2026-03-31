@@ -138,9 +138,31 @@ def _quality(base64, io, math, mo, model_type, np, pd, plt, result, results_df, 
     _quality_html = mo.Html(f'<img src="data:image/png;base64,{base64.b64encode(_buf.read()).decode()}" style="width:100%;max-width:1400px"/>')
     plt.close(_fig)
 
+    # ── Tableau numérique ────────────────────────────────────────────────────
+    if model_type == 'classification':
+        _base = results_df['tp_rate'].mean()
+        _quality_df = pd.DataFrame({
+            'Seuil proba':   [f'{t:.2f}' for t in _thrs],
+            'N signaux':     _ns,
+            'Précision':     [round(p, 4) for p in _precs],
+            'Baseline':      round(_base, 4),
+            'Lift':          [round(p - _base, 4) for p in _precs],
+            'Break-even SL=0.9%': '37.5%',
+            'Break-even SL=0.5%': '25.0%',
+            'Break-even SL=0.4%': '21.1%',
+        })
+    else:
+        _quality_df = pd.DataFrame({
+            'Seuil R/R':        [str(t) for t in _thrs_rr],
+            'Signaux/fold moy': [round(n, 0) for n in _nsigs],
+            'Lift R/R moy':     [round(l, 4) for l in _lifts],
+        })
+
     mo.vstack([
         mo.md("### Distribution du signal & qualité par seuil"),
         _quality_html,
+        mo.md("#### Tableau — précision & lift par seuil"),
+        mo.ui.table(_quality_df, selection=None),
     ])
     return
 
