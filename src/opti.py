@@ -57,10 +57,12 @@ def grid_hash(grid):
     """
     Retourne un identifiant court (8 hex) unique pour une grille de paramètres.
     Inclut fees + slippage : changer la config crée un nouveau dossier cache.
+    Utilise json.dumps pour un sérialisation stable (pas de np.float64 dans str).
     """
+    import json
     from config import FEES, SLIPPAGE
-    canonical = {k: sorted(v) for k, v in grid.items()}
-    sig = str(sorted(canonical.items())) + f'|fees={FEES}|slip={SLIPPAGE}'
+    canonical = {k: [round(float(x), 8) for x in sorted(v)] for k, v in grid.items()}
+    sig = json.dumps(canonical, sort_keys=True) + f'|fees={float(FEES)}|slip={float(SLIPPAGE)}'
     h = hashlib.md5(sig.encode()).hexdigest()[:8]
     return h
 
