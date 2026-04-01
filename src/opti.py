@@ -113,6 +113,7 @@ def run_opti(data, strategy, pair, tf, exchange, grid, cache_dir='./cache'):
         objective_fn,
         merge_func='concat',
         execute_kwargs=dict(
+            n_workers=n_workers,
             chunk_len=n_workers * 4,
             distribute='chunks',
             engine='pathos',
