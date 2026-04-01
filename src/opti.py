@@ -1,5 +1,6 @@
 import sys
 import os
+import hashlib
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from vectorbtpro import *
@@ -45,6 +46,25 @@ def ram_objective(data, ma_window, env_pct, sl_pct):
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def grid_hash(grid):
+    """
+    Retourne un identifiant court (8 hex) unique pour une grille de paramètres.
+    Deux grilles identiques → même hash. Affiche aussi le résumé lisible.
+    """
+    canonical = {k: sorted(v) for k, v in grid.items()}
+    sig = str(sorted(canonical.items()))
+    h = hashlib.md5(sig.encode()).hexdigest()[:8]
+    return h
+
+
+def grid_summary(grid):
+    """Résumé lisible de la grille : param min→max (n valeurs)."""
+    parts = []
+    for k, v in grid.items():
+        parts.append(f"{k}: {v[0]}→{v[-1]} ({len(v)} valeurs)")
+    return '  |  '.join(parts)
+
 
 def list_pairs(exchange, tf):
     d = f'./data/raw/{exchange}/{tf}'
@@ -290,15 +310,19 @@ if __name__ == '__main__':
 
     strategy, mode, exchange, tf, pairs, grid = menu()
 
-    if mode in ('full', 'liquid'):
-        cache_dir = f'./cache/full_{exchange}_{tf}'
-    else:
-        cache_dir = './cache'
+    gh = grid_hash(grid)
+    prefix = 'kc_wfsl' if strategy == 'keltner' else 'ram'
 
+    if mode in ('full', 'liquid'):
+        cache_dir = f'./cache/full_{exchange}_{tf}/{prefix}_grid_{gh}'
+    else:
+        cache_dir = f'./cache/{prefix}_grid_{gh}'
+
+    print(f"\nGrille [{gh}] : {grid_summary(grid)}")
+    print(f"Cache → {cache_dir}/\n")
     os.makedirs(cache_dir, exist_ok=True)
 
     # Filtrer les paires déjà dans le cache
-    prefix  = 'kc_wfsl' if strategy == 'keltner' else 'ram'
     to_run  = []
     skipped = 0
     for p in pairs:
