@@ -99,8 +99,8 @@ def run_opti(data, strategy, pair, tf, exchange, grid, cache_dir='./cache'):
     import gc
     import multiprocessing
     n_cpus    = multiprocessing.cpu_count()
-    n_workers = max(1, int(n_cpus * 0.5))
-    print(f"\nWorkers : {n_workers}/{n_cpus} (50%)")
+    n_workers = max(1, int(n_cpus * 0.8))
+    print(f"\nWorkers : {n_workers}/{n_cpus} (80%)")
 
     splitter = vbt.Splitter.from_n_rolling(
         data.index, n=10, length='optimize', split=0.7,
@@ -113,7 +113,7 @@ def run_opti(data, strategy, pair, tf, exchange, grid, cache_dir='./cache'):
         objective_fn,
         merge_func='concat',
         execute_kwargs=dict(
-            chunk_len=n_workers,
+            chunk_len=n_workers * 4,
             distribute='chunks',
             engine='pathos',
             show_progress=True,
