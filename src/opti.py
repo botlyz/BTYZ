@@ -50,10 +50,11 @@ def ram_objective(data, ma_window, env_pct, sl_pct):
 def grid_hash(grid):
     """
     Retourne un identifiant court (8 hex) unique pour une grille de paramètres.
-    Deux grilles identiques → même hash. Affiche aussi le résumé lisible.
+    Inclut fees + slippage : changer la config crée un nouveau dossier cache.
     """
+    from config import FEES, SLIPPAGE
     canonical = {k: sorted(v) for k, v in grid.items()}
-    sig = str(sorted(canonical.items()))
+    sig = str(sorted(canonical.items())) + f'|fees={FEES}|slip={SLIPPAGE}'
     h = hashlib.md5(sig.encode()).hexdigest()[:8]
     return h
 
