@@ -153,9 +153,11 @@ def _controls(glob_mod, mo, os):
         if os.path.isdir(d):
             _subdirs.add(d)
     _all_dirs = ['cache/'] + sorted([d + '/' for d in _subdirs])
+    _dir_options = {d.removeprefix('cache/').rstrip('/') or 'cache (racine)': d for d in _all_dirs}
+    _default_label = next(iter(_dir_options))
     folder_selector = mo.ui.dropdown(
-        options={d.removeprefix('cache/').rstrip('/') or 'cache (racine)': d for d in _all_dirs},
-        value='cache/',
+        options=_dir_options,
+        value=_default_label,
         label='Dossier pickles',
     )
     pattern_input = mo.ui.text(value='*lighter*', label='Filtre pickles (glob)')
