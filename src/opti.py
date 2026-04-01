@@ -115,7 +115,7 @@ def run_opti(data, strategy, pair, tf, exchange, grid, cache_dir='./cache'):
         objective_fn,
         merge_func='concat',
         execute_kwargs=dict(
-            chunk_len=n_workers * 4,
+            chunk_len=n_workers,
             distribute='chunks',
             engine='pathos',
             init_kwargs=dict(nodes=n_workers),
@@ -364,7 +364,10 @@ if __name__ == '__main__':
         if data is None:
             print(f"  Pas de data pour {p}, skip")
             continue
-        run_opti(data, strategy, p, tf, exchange, grid, cache_dir=cache_dir)
+        try:
+            run_opti(data, strategy, p, tf, exchange, grid, cache_dir=cache_dir)
+        except Exception as e:
+            print(f"\n  ERREUR sur {p} : {e} — skip et on continue")
         del data
 
     elapsed = time.time() - t0
