@@ -3,7 +3,7 @@ import pandas as pd
 from numba import njit
 from vectorbtpro import vbt
 
-from config import FEES, INIT_CASH
+from config import FEES, INIT_CASH, SLIPPAGE
 
 
 @njit
@@ -212,6 +212,7 @@ def run_backtest(data, ma_window, envelope_levels, allocations, sl_pct,
         init_cash=INIT_CASH,
         leverage=leverage,
         fees=FEES,
+        slippage=SLIPPAGE,
         freq=freq,
     )
     return pf

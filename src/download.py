@@ -63,7 +63,7 @@ def _print_progress(progress, msg=''):
         print()
 
 
-async def download_lighter_all(tf='1h'):
+async def download_lighter_all(tf='1h', symbols=None):
     """telecharge TOUTES les paires futures de lighter en async
     architecture : worker pool, chaque worker a son proxy et fait 1 req/s
     une queue globale de jobs (market_id, chunk_start, chunk_end) est consommée par les workers"""
@@ -78,7 +78,8 @@ async def download_lighter_all(tf='1h'):
 
     markets = [(ob['market_id'], ob['symbol'])
                for ob in data['order_books']
-               if ob.get('market_type') == 'perp']
+               if ob.get('market_type') == 'perp'
+               and (symbols is None or ob['symbol'] in symbols)]
     print(f'{len(markets)} marchés perp trouvés sur Lighter')
 
     output_dir = f'data/raw/lighter/{tf}'
@@ -336,7 +337,7 @@ if __name__ == '__main__':
     if exchange == 'lighter':
         print("Mode Lighter : download async avec proxys")
         import asyncio
-        asyncio.run(download_lighter_all(tf=timeframe))
+        asyncio.run(download_lighter_all(tf=timeframe, symbols=symbols if symbols else None))
     else:
         if not symbols:
             print("Erreur : il faut au moins 1 symbol pour les exchanges classiques")

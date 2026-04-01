@@ -258,10 +258,16 @@ def make_atr_barrier_label(
 @njit
 def _atr_3class_nb(close_arr, atr_pct_arr, rr, max_bars):
     """
-    Pour chaque bougie, regarde les `max_bars` suivantes :
-      +1 : prix monte rr×ATR avant de descendre 1×ATR  → bon long
-      -1 : prix descend rr×ATR avant de monter 1×ATR   → bon short
-       0 : ni l'un ni l'autre                           → neutre
+    Pour chaque bougie, deux scans indépendants :
+
+      Scan long  : TP = +rr×ATR, SL = -1×ATR
+      Scan short : TP = -rr×ATR, SL = +1×ATR
+
+      +1 : long TP touché en premier (avant SL long ET avant short TP)
+      -1 : short TP touché en premier (avant SL short ET avant long TP)
+       0 : neutre (SL touché ou max_bars écoulé sans TP)
+
+    Les deux scans sont indépendants — pas de SL commun qui bloque tout.
     """
     n = len(close_arr)
     labels = np.zeros(n, dtype=np.int8)
@@ -274,17 +280,34 @@ def _atr_3class_nb(close_arr, atr_pct_arr, rr, max_bars):
         tp_short = entry * (1.0 - rr  * atr_pct_arr[i])
         sl_short = entry * (1.0 + 1.0 * atr_pct_arr[i])
         end = min(i + max_bars, n - 1)
+
+        long_bar  = max_bars + 1   # bar où long TP est touché (si jamais)
+        short_bar = max_bars + 1   # bar où short TP est touché (si jamais)
+        long_done  = False
+        short_done = False
+
         for j in range(i + 1, end + 1):
             price = close_arr[j]
-            if price >= tp_long:
-                labels[i] = 1
+            if not long_done:
+                if price >= tp_long:
+                    long_bar  = j - i
+                    long_done = True
+                elif price <= sl_long:
+                    long_done = True          # SL long → scan long annulé
+            if not short_done:
+                if price <= tp_short:
+                    short_bar  = j - i
+                    short_done = True
+                elif price >= sl_short:
+                    short_done = True         # SL short → scan short annulé
+            if long_done and short_done:
                 break
-            elif price <= tp_short:
-                labels[i] = -1
-                break
-            elif price <= sl_long or price >= sl_short:
-                # SL commun des deux côtés → neutre
-                break
+
+        if long_bar < short_bar:
+            labels[i] = 1    # long TP touché en premier
+        elif short_bar < long_bar:
+            labels[i] = -1   # short TP touché en premier
+        # égalité ou aucun TP → 0 (neutre)
     return labels
 
 

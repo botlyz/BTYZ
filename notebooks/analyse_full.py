@@ -154,6 +154,7 @@ def _controls(glob_mod, mo, os):
         label='Dossier pickles',
     )
     pattern_input = mo.ui.text(value='*lighter*', label='Filtre pickles (glob)')
+    refresh_btn = mo.ui.button(label='Rafraîchir les fichiers', on_click=lambda x: x + 1, value=0)
 
     max_dd = mo.ui.slider(0, 100, value=35, step=1, label='Max Drawdown < X% (0=off)', show_value=True)
     min_wr = mo.ui.slider(0, 100, value=0, step=1, label='Win Rate > X% (0=off)', show_value=True)
@@ -164,7 +165,7 @@ def _controls(glob_mod, mo, os):
 
     mo.output.replace(mo.vstack([
         mo.md("## Critères de filtrage"),
-        mo.hstack([folder_selector, pattern_input], justify="start", gap=2),
+        mo.hstack([folder_selector, pattern_input, refresh_btn], justify="start", gap=2),
         mo.hstack([max_dd, min_wr, min_sharpe, min_return, min_pct_windows, min_trades], justify="start", gap=2),
     ]))
     return (
@@ -176,6 +177,7 @@ def _controls(glob_mod, mo, os):
         min_trades,
         min_wr,
         pattern_input,
+        refresh_btn,
     )
 
 
@@ -190,6 +192,7 @@ def _load_data(
     os,
     pair_from_filename,
     pattern_input,
+    refresh_btn,
 ):
     from concurrent.futures import ThreadPoolExecutor
 
@@ -263,6 +266,14 @@ def _filter_and_score(
 
         test_data[_pair] = _test
 
+        # Dériver les params réels depuis l'index de CE DataFrame
+        # (robuste aux caches parquet stale ou pickles avec params différents)
+        _pair_params = [p for p in detected_params if p in _test.index.names]
+        if not _pair_params:
+            _pair_params = [n for n in _test.index.names if n not in {'split', 'set', None}]
+        if not _pair_params:
+            continue
+
         # Filtrage vectorisé : masque booléen sur tout le DataFrame d'un coup,
         # puis groupby.min() (C pur) pour vérifier que TOUTES les fenêtres passent
         _mask = pd.Series(True, index=_test.index)
@@ -277,11 +288,11 @@ def _filter_and_score(
         if min_trades.value > 0 and 'Total Trades' in _test.columns:
             _mask &= _test['Total Trades'] >= min_trades.value
 
-        _pct_pass = _mask.groupby(level=detected_params).mean() * 100
+        _pct_pass = _mask.groupby(level=_pair_params).mean() * 100
         valid_combos[_pair] = _pct_pass[_pct_pass >= min_pct_windows.value].index
 
         # Score composite sur toutes les combos (médiane cross-fenêtres)
-        _agg = _test.groupby(level=detected_params)[_needed].median()
+        _agg = _test.groupby(level=_pair_params)[_needed].median()
         _agg = _agg.dropna()
         if len(_agg) == 0:
             combo_scores[_pair] = pd.Series(dtype=float)
@@ -371,10 +382,12 @@ def _section3(
         if _vcs is None or len(_vcs) == 0 or _test is None:
             continue
         _scores = combo_scores.get(_pair, pd.Series(dtype=float))
+        _pair_params3 = [p for p in detected_params if p in _test.index.names] or \
+                        [n for n in _test.index.names if n not in {'split', 'set', None}]
 
         for _combo in _vcs:
             try:
-                _grp = _test.xs(_combo, level=detected_params)
+                _grp = _test.xs(_combo, level=_pair_params3)
             except KeyError:
                 continue
 
@@ -401,7 +414,7 @@ def _section3(
                     pass
 
             _score = float(_scores.loc[_combo]) if _combo in _scores.index else np.nan
-            _params = fmt_params(dict(zip(detected_params, _combo if isinstance(_combo, tuple) else [_combo])))
+            _params = fmt_params(dict(zip(_pair_params3, _combo if isinstance(_combo, tuple) else [_combo])))
 
             _rows.append({
                 'paire': _pair,
@@ -438,23 +451,29 @@ def _section4(combo_scores, detected_params, fmt_params, mo, np, pairs, pd, vali
         if _vcs is None or len(_vcs) == 0 or _scores is None or len(_scores) == 0:
             continue
 
+        # Params réels de cette paire (robuste aux index hétérogènes)
+        if isinstance(_scores.index, pd.MultiIndex):
+            _pair_params4 = list(_scores.index.names)
+        else:
+            _pair_params4 = [_scores.index.name] if _scores.index.name else detected_params
+
         # Grille de valeurs par paramètre
-        _grid = {p: sorted(_scores.index.get_level_values(p).unique()) for p in detected_params}
+        _grid = {p: sorted(_scores.index.get_level_values(p).unique()) for p in _pair_params4}
 
         for _combo in _vcs:
-            _params = fmt_params(dict(zip(detected_params, _combo if isinstance(_combo, tuple) else [_combo])))
+            _params = fmt_params(dict(zip(_pair_params4, _combo if isinstance(_combo, tuple) else [_combo])))
             _combo_score = float(_scores.loc[_combo]) if _combo in _scores.index else np.nan
 
             # Trouver les voisins (±1 step sur chaque axe)
             _neighbor_scores = []
-            for _p in detected_params:
+            for _p in _pair_params4:
                 _vals = _grid[_p]
                 _idx = _vals.index(_params[_p]) if _params[_p] in _vals else -1
                 for _delta in [-1, 1]:
                     _ni = _idx + _delta
                     if 0 <= _ni < len(_vals):
                         _neighbor_params = {**_params, _p: _vals[_ni]}
-                        _key = tuple(_neighbor_params[p] for p in detected_params)
+                        _key = tuple(_neighbor_params[p] for p in _pair_params4)
                         if _key in _scores.index:
                             _neighbor_scores.append(float(_scores.loc[_key]))
 
@@ -494,6 +513,8 @@ def _section5(compute_dsr, detected_params, mo, np, pairs, pd, test_data):
             continue
 
         _all_sr = _test['Sharpe Ratio'].astype(float).dropna().values
+        if len(_all_sr) == 0:
+            continue
 
         # T = nb candles par fenêtre test (depuis Total Duration si dispo)
         _T = 5000  # fallback
@@ -504,7 +525,9 @@ def _section5(compute_dsr, detected_params, mo, np, pairs, pd, test_data):
             except Exception:
                 pass
 
-        _N = len(_test.groupby(level=detected_params).first())  # nb de combos
+        _pair_params5 = [p for p in detected_params if p in _test.index.names] or \
+                        [n for n in _test.index.names if n not in {'split', 'set', None}]
+        _N = len(_test.groupby(level=_pair_params5).first())  # nb de combos
         _dsr = compute_dsr(_all_sr, _T)
         _sr_max = float(np.nanmax(_all_sr))
         _sr_med = float(np.nanmedian(_all_sr))
@@ -647,8 +670,14 @@ def _section6_heatmaps(
         mo.stop(True, mo.callout(mo.md("Choisis deux axes différents."), kind="warn"))
 
     # ── Heatmap global : nb de paires avec combo valide à chaque (yp, xp) ──
+    def _flat_idx(s):
+        """Aplatit un MultiIndex en tuples pour permettre le concat cross-stratégies."""
+        if isinstance(s.index, pd.MultiIndex):
+            return s.set_axis(s.index.to_flat_index())
+        return s
+
     _all_scores = pd.concat(
-        [combo_scores[p].rename(p) for p in pairs if p in combo_scores and len(combo_scores[p]) > 0],
+        [_flat_idx(combo_scores[p]).rename(p) for p in pairs if p in combo_scores and len(combo_scores[p]) > 0],
         axis=1
     ) if pairs else pd.DataFrame()
 

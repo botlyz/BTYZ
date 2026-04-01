@@ -1,6 +1,7 @@
 #constantes globales du projet, importées un peu partout
 
-FEES = 0.001 #frais de trading (0.1% par trade, standard binance)
+FEES = 0.001     # frais de trading : 0.1% par trade (10bps, Lighter volume tier)
+SLIPPAGE = 0.0002 # spread bid-ask estimé : 0.02% par trade (paires liquides Lighter)
 INIT_CASH = 10000 #capital de depart pour les bt
 MIN_TRADES = 30 #en dessous de 30 trades c'est pas fiable statistiquement
 MAX_DRAWDOWN = 0.30 #dd max 30%, au dela c'est trop risqué

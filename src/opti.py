@@ -21,8 +21,8 @@ GRIDS = {
     },
     'ram': {
         'ma_window': list(range(20, 320, 20)),
-        'env_pct':   list(np.arange(0.01, 0.21, 0.01)),
-        'sl_pct':    list(np.arange(0.01, 0.11, 0.01)),
+        'env_pct':   [round(x, 4) for x in np.arange(0.005, 0.085, 0.005)],  # 0.5% → 8% step 0.5%
+        'sl_pct':    [round(x, 4) for x in np.arange(0.005, 0.085, 0.005)],  # 0.5% → 8% step 0.5%
     },
 }
 
@@ -162,9 +162,10 @@ def menu():
     mode = questionary.select(
         "Mode :",
         choices=[
-            questionary.Choice("single — une seule paire",        value='single'),
-            questionary.Choice("multi  — liste de paires",        value='multi'),
-            questionary.Choice("full   — toutes les paires",      value='full'),
+            questionary.Choice("single — une seule paire",              value='single'),
+            questionary.Choice("multi  — liste de paires",              value='multi'),
+            questionary.Choice("liquid — paires par tier de liquidité", value='liquid'),
+            questionary.Choice("full   — toutes les paires",            value='full'),
         ],
         style=STYLE,
     ).ask()
@@ -223,6 +224,37 @@ def menu():
         if not pairs:
             sys.exit(0)
 
+    elif mode == 'liquid':
+        import json
+        liq_path = './liquidity.json'
+        if not os.path.exists(liq_path):
+            print(f"Erreur : {liq_path} introuvable. Lance d'abord : python src/liquidity.py")
+            sys.exit(1)
+        with open(liq_path) as f:
+            liq = json.load(f)
+
+        tiers = questionary.checkbox(
+            "Tiers de liquidité (espace pour sélectionner) :",
+            choices=[
+                questionary.Choice(f"★★ Très liquide  ({len(liq['tres_liquide'])} paires)", value='tres_liquide'),
+                questionary.Choice(f"★  Liquide       ({len(liq['liquide'])} paires)",      value='liquide'),
+                questionary.Choice(f"~  Moyen         ({len(liq['moyen'])} paires)",         value='moyen'),
+            ],
+            style=STYLE,
+            validate=lambda x: True if len(x) > 0 else "Sélectionne au moins un tier",
+        ).ask()
+        if not tiers:
+            sys.exit(0)
+
+        liquid_set = set()
+        for tier in tiers:
+            liquid_set.update(liq[tier])
+        pairs = [p for p in pairs_avail if p in liquid_set]
+        if not pairs:
+            print("Aucune paire disponible pour les tiers sélectionnés dans ce timeframe.")
+            sys.exit(0)
+        print(f"  → {len(pairs)} paires sélectionnées : {', '.join(pairs[:10])}{'...' if len(pairs) > 10 else ''}")
+
     else:  # full
         pairs = pairs_avail
 
@@ -258,7 +290,7 @@ if __name__ == '__main__':
 
     strategy, mode, exchange, tf, pairs, grid = menu()
 
-    if mode == 'full':
+    if mode in ('full', 'liquid'):
         cache_dir = f'./cache/full_{exchange}_{tf}'
     else:
         cache_dir = './cache'
