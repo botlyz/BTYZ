@@ -144,12 +144,17 @@ def _imports():
 
 @app.cell
 def _controls(glob_mod, mo, os):
-    # Dossiers disponibles
-    _cache_dirs = ['cache/'] + sorted([
-        d + '/' for d in glob_mod.glob('cache/*') if os.path.isdir(d)
-    ])
+    # Dossiers disponibles (cache/ + 1 niveau + 2 niveaux)
+    _subdirs = set()
+    for d in glob_mod.glob('cache/*'):
+        if os.path.isdir(d):
+            _subdirs.add(d)
+    for d in glob_mod.glob('cache/*/*'):
+        if os.path.isdir(d):
+            _subdirs.add(d)
+    _all_dirs = ['cache/'] + sorted([d + '/' for d in _subdirs])
     folder_selector = mo.ui.dropdown(
-        options={d: d for d in _cache_dirs},
+        options={d.removeprefix('cache/').rstrip('/') or 'cache (racine)': d for d in _all_dirs},
         value='cache/',
         label='Dossier pickles',
     )
