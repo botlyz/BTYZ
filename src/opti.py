@@ -32,15 +32,21 @@ GRIDS = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 def keltner_objective(data, ma_window, atr_window, atr_mult, sl_stop):
-    from src.strategies.keltner import run_backtest
-    pf = run_backtest(data, ma_window, atr_window, atr_mult, sl_stop)
-    return pf.stats()
+    try:
+        from src.strategies.keltner import run_backtest
+        pf = run_backtest(data, ma_window, atr_window, atr_mult, sl_stop)
+        return pf.stats()
+    except Exception:
+        return None
 
 
 def ram_objective(data, ma_window, env_pct, sl_pct):
-    from src.strategies.ram_dca import run_backtest
-    pf = run_backtest(data, ma_window, [env_pct], [1.0], sl_pct)
-    return pf.stats()
+    try:
+        from src.strategies.ram_dca import run_backtest
+        pf = run_backtest(data, ma_window, [env_pct], [1.0], sl_pct)
+        return pf.stats()
+    except Exception:
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,8 +99,8 @@ def run_opti(data, strategy, pair, tf, exchange, grid, cache_dir='./cache'):
     import gc
     import multiprocessing
     n_cpus    = multiprocessing.cpu_count()
-    n_workers = max(1, int(n_cpus * 0.8))
-    print(f"\nWorkers : {n_workers}/{n_cpus} (80%)")
+    n_workers = max(1, int(n_cpus * 0.5))
+    print(f"\nWorkers : {n_workers}/{n_cpus} (50%)")
 
     splitter = vbt.Splitter.from_n_rolling(
         data.index, n=10, length='optimize', split=0.7,
