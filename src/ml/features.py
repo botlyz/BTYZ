@@ -106,4 +106,16 @@ def add_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
         df['taker_buy_volume'] / (df['volume'] + 1e-9)
     )
 
+    # ── Divergences explicites prix / CVD ─────────────────────────────────────
+    # Valeur positive = divergence baissière (prix monte, CVD ne suit pas)
+    # Valeur négative = divergence haussière (prix monte avec CVD)
+    for lag in [5, 15, 30, 60]:
+        p = df[f'price_d{lag}']
+        c = df[f'cvd_perp_d{lag}']
+        s = df[f'cvd_spot_d{lag}']
+        # Magnitude de la divergence (écart normalisé entre move prix et move CVD)
+        df[f'div_mag_perp_{lag}'] = p - c / (c.abs().rolling(lag * 10, min_periods=lag).mean() + 1e-9) * p.abs().rolling(lag * 10, min_periods=lag).mean()
+        # Confirmation spot vs perp (divergence inter-marché)
+        df[f'div_spot_perp_{lag}'] = np.sign(c) - np.sign(s)   # 0=alignés, ±2=divergence
+
     return df

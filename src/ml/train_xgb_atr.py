@@ -71,9 +71,9 @@ def make_wf_splits(index, train_months=6, test_months=1):
     return splits
 
 
-# ── Entraînement pour un RR ───────────────────────────────────────────────────
+# ── Entraînement pour un RR et un Side ────────────────────────────────────────
 
-def train_one_rr(df, rr):
+def train_one_side(df, rr, side='long'):
     try:
         import xgboost as xgb
     except ImportError:
@@ -82,31 +82,31 @@ def train_one_rr(df, rr):
 
     be = 1.0 / (rr + 1.0)
     print(f"\n{'='*65}")
-    print(f"RR = {rr}  |  TP = {rr}×ATR  |  SL = 1×ATR  |  Break-even = {be:.1%}")
+    print(f"SIDE = {side.upper()}  |  RR = {rr}  |  TP = {rr}×ATR  |  SL = 1×ATR")
     print(f"{'='*65}")
 
     # Label ATR dynamique
-    print(f"Calcul labels ATR (rr={rr}, max_bars={MAX_BARS})...")
+    print(f"Calcul labels ATR {side} (rr={rr}, max_bars={MAX_BARS})...")
     label = make_atr_barrier_label(
         df['close'], df['high'], df['low'],
         rr=rr, atr_period=ATR_PERIOD, max_bars=MAX_BARS,
+        side=side
     )
     label_stats(label)
 
-    df = df.copy()
-    df['label'] = label
-    df = add_momentum_features(df)
+    df_side = df.copy()
+    df_side['label'] = label
+    df_side = add_momentum_features(df_side)
 
-    feat_cols = [c for c in df.columns if c in FEATURES_RAW or
+    feat_cols = [c for c in df_side.columns if c in FEATURES_RAW or
                  any(c.startswith(p) for p in
                      ['cvd_perp_d', 'cvd_spot_d', 'price_d', 'div_perp_', 'taker_ratio'])]
 
-    df_clean = df[feat_cols + ['label']].dropna()
+    df_clean = df_side[feat_cols + ['label']].dropna()
     print(f"Bougies après dropna : {len(df_clean):,}")
 
     splits = make_wf_splits(df_clean.index, TRAIN_MONTHS, TEST_MONTHS)
     print(f"Walk-forward : {len(splits)} folds ({TRAIN_MONTHS}m train / {TEST_MONTHS}m test)")
-    print(f"Break-even à battre par fold : {be:.1%}\n")
 
     results, importances, all_preds, all_labels = [], [], [], []
 
@@ -127,7 +127,6 @@ def train_one_rr(df, rr):
         mask_te = y_te != 0
 
         if mask_tr.sum() < MIN_SAMPLES or mask_te.sum() < 50:
-            print(f"  Fold {i+1:2d} → skip (trades insuffisants : {mask_tr.sum()})")
             continue
 
         X_tr_a = X_tr[mask_tr]
@@ -151,40 +150,29 @@ def train_one_rr(df, rr):
         )
         model.fit(X_tr_a, y_tr_a)
 
-        preds = model.predict(X_te_a)
         proba = model.predict_proba(X_te_a)[:, 1]
+        preds = (proba > 0.5).astype(int)
 
         tp_rate   = float(y_te_a.mean())
         pred_pos  = preds == 1
         n_signals = int(pred_pos.sum())
 
         if n_signals > 0:
-            precision = float((preds[pred_pos] == y_te_a.values[pred_pos]).mean())
+            precision = float((y_te_a.values[pred_pos] == 1).mean())
         else:
             precision = 0.0
 
         lift       = precision - tp_rate if n_signals > 0 else 0.0
         profitable = precision > be and n_signals > 10
 
-        flag = '✅' if profitable else '❌'
-        print(
-            f"  Fold {i+1:2d} | {te_s.date()} → {te_e.date()} "
-            f"| tp_rate={tp_rate:.3f} | BE={be:.3f} "
-            f"| precision={precision:.3f} | lift={lift:+.3f} "
-            f"| n={n_signals:5d} | {flag}"
-        )
-
         results.append({
             'fold':       i + 1,
             'test_start': te_s,
-            'test_end':   te_e,
-            'n_trades':   int(mask_te.sum()),
-            'tp_rate':    tp_rate,
-            'break_even': be,
-            'n_signals':  n_signals,
             'precision':  precision,
+            'tp_rate':    tp_rate,
             'lift':       lift,
             'profitable': profitable,
+            'n_signals':  n_signals,
         })
 
         importances.append(dict(zip(feat_cols, model.feature_importances_)))
@@ -192,47 +180,35 @@ def train_one_rr(df, rr):
         all_labels.append(y_te_a)
 
     if not results:
-        print("Aucun fold valide.")
         return None
 
     results_df = pd.DataFrame(results)
     n_prof = results_df['profitable'].sum()
     n_tot  = len(results_df)
 
-    print(f"\n{'─'*65}")
-    print(f"RR={rr} — Résumé OOS")
-    print(f"  Précision moyenne   : {results_df['precision'].mean():.3f}")
-    print(f"  Break-even          : {be:.3f}")
-    print(f"  Lift moyen          : {results_df['lift'].mean():+.3f}")
-    print(f"  Folds profitables   : {n_prof}/{n_tot} ({n_prof/n_tot:.0%})")
-    print(f"  → {'✅ VIABLE' if n_prof/n_tot >= 0.55 else '❌ PAS VIABLE'}")
-    print(f"{'─'*65}")
-
-    imp_df = pd.DataFrame(importances).mean().sort_values(ascending=False)
-    print(f"\nTop 10 features (RR={rr}) :")
-    print(imp_df.head(10).to_string())
+    print(f"\nRésumé {side.upper()} RR={rr} : Prec={results_df['precision'].mean():.3f} | Lift={results_df['lift'].mean():+.3f} | OK={n_prof}/{n_tot}")
 
     preds_series  = pd.concat(all_preds).sort_index()
     labels_series = pd.concat(all_labels).sort_index()
 
     output = {
-        'name':       f'atr_rr{rr}',
+        'name':       f'atr_{side}_rr{rr}',
+        'side':       side,
         'rr':         rr,
         'atr_period': ATR_PERIOD,
         'max_bars':   MAX_BARS,
         'break_even': be,
-        'config':     {'tp': f'{rr}×ATR', 'sl': '1×ATR', 'max_bars': MAX_BARS},
+        'config':     {'tp': f'{rr}×ATR', 'sl': '1×ATR', 'max_bars': MAX_BARS, 'side': side},
         'results_df': results_df,
-        'importance': imp_df,
+        'importance': pd.DataFrame(importances).mean().sort_values(ascending=False),
         'preds_oos':  preds_series,
         'labels_oos': labels_series,
         'feature_cols': feat_cols,
     }
 
-    out_path = os.path.join(OUTPUT_DIR, f'xgb_atr_rr{rr}.pkl')
+    out_path = os.path.join(OUTPUT_DIR, f'xgb_atr_{side}_rr{rr}.pkl')
     with open(out_path, 'wb') as f:
         pickle.dump(output, f)
-    print(f"\nSauvegardé → {out_path}")
 
     return output
 
@@ -241,37 +217,13 @@ def train_one_rr(df, rr):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--rr', type=float, nargs='+', default=RR_LIST,
-                        help='Ratios RR à tester (ex: --rr 2 3 5)')
+    parser.add_argument('--rr', type=float, nargs='+', default=RR_LIST)
+    parser.add_argument('--side', type=str, nargs='+', default=['long', 'short'])
     args = parser.parse_args()
 
     print("Chargement données...")
     df = load_dataset()
 
-    all_results = {}
     for rr in args.rr:
-        res = train_one_rr(df, rr)
-        if res:
-            all_results[rr] = res
-
-    # ── Tableau comparatif final ───────────────────────────────────────────────
-    if len(all_results) > 1:
-        print(f"\n{'='*65}")
-        print("COMPARAISON FINALE — RR vs Break-even")
-        print(f"{'='*65}")
-        print(f"{'RR':>4} {'Break-even':>12} {'Précision':>10} {'Lift moy':>10} "
-              f"{'Folds ok':>9} {'Résultat':>10}")
-        print('─' * 65)
-        for rr, res in sorted(all_results.items()):
-            df_r = res['results_df']
-            be   = res['break_even']
-            n_ok = df_r['profitable'].sum()
-            n    = len(df_r)
-            ok   = '✅ VIABLE' if n_ok / n >= 0.55 else '❌'
-            print(f"{rr:>4.0f} {be:>12.1%} {df_r['precision'].mean():>10.3f} "
-                  f"{df_r['lift'].mean():>+10.3f} {n_ok:>4}/{n:<4} {ok:>10}")
-
-        best = max(all_results.items(),
-                   key=lambda x: x[1]['results_df']['profitable'].mean())
-        print(f"\n→ Meilleur RR : {best[0]}  "
-              f"({best[1]['results_df']['profitable'].mean():.0%} folds profitables)")
+        for side in args.side:
+            train_one_side(df, rr, side=side)

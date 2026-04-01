@@ -240,10 +240,6 @@ def train_lstm_rr(df, seq_len=SEQ_LEN, horizon=HORIZON, force=False):
                     epoch_loss += loss.item()
                 epoch_loss /= len(loader)
 
-            # Libère la mémoire GPU du fold précédent
-            del X_tr_gpu, yg_tr_gpu, yl_tr_gpu
-            torch.cuda.empty_cache()
-
                 if epoch_loss < best_loss - 1e-6:
                     best_loss = epoch_loss
                     no_imp    = 0
@@ -251,6 +247,10 @@ def train_lstm_rr(df, seq_len=SEQ_LEN, horizon=HORIZON, force=False):
                     no_imp += 1
                     if no_imp >= PATIENCE:
                         break
+
+            # Libère la mémoire GPU du fold précédent
+            del X_tr_gpu, yg_tr_gpu, yl_tr_gpu
+            torch.cuda.empty_cache()
 
             # ── Évaluation (par chunks pour éviter OOM) ───────────────────────
             model.eval()

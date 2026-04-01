@@ -99,7 +99,8 @@ def train_3class(df, rr):
 
     feat_cols = [c for c in df2.columns if c in FEATURES_RAW or
                  any(c.startswith(p) for p in
-                     ['cvd_perp_d', 'cvd_spot_d', 'price_d', 'div_perp_', 'taker_ratio'])]
+                     ['cvd_perp_d', 'cvd_spot_d', 'price_d', 'div_perp_', 'div_mag_',
+                      'div_spot_perp_', 'taker_ratio'])]
 
     df_clean = df2[feat_cols + ['label']].dropna()
     print(f"Bougies après dropna : {len(df_clean):,}")
@@ -144,7 +145,7 @@ def train_3class(df, rr):
             learning_rate    = 0.05,
             subsample        = 0.8,
             colsample_bytree = 0.8,
-            objective        = 'multi:softmax',
+            objective        = 'multi:softprob',
             num_class        = 3,
             eval_metric      = 'mlogloss',
             device           = 'cuda',
