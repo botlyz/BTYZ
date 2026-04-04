@@ -6,7 +6,7 @@ from vectorbtpro import vbt
 from config import FEES, INIT_CASH, SLIPPAGE
 
 
-@njit
+@njit(cache=True)
 def ram_dca_nb(high, low, close, ma, upper_envs, lower_envs, allocations, sl_pct):
     """
     DCA mean reversion multi-niveaux avec stop loss et cooldown post-SL.
@@ -43,8 +43,22 @@ def ram_dca_nb(high, low, close, ma, upper_envs, lower_envs, allocations, sl_pct
     avg_entry     = 0.0
     qty           = 0.0
     sl_cooldown   = False
+    pending_sl    = False  # SL à exécuter sur la bougie suivante
+    pending_sl_px = 0.0
 
     for i in range(1, n):
+        # ── SL différé : entrée + SL sur la même bougie → exit sur bougie suivante
+        if pending_sl:
+            target_size[i] = 0.0
+            exec_price[i]  = pending_sl_px
+            pos_dir     = 0
+            level_idx   = 0
+            avg_entry   = 0.0
+            qty         = 0.0
+            sl_cooldown = True
+            pending_sl  = False
+            continue
+
         ma_prev = ma[i - 1]
         if np.isnan(ma_prev):
             continue
@@ -130,7 +144,19 @@ def ram_dca_nb(high, low, close, ma, upper_envs, lower_envs, allocations, sl_pct
                     sl_px  = sl_level
 
         # ── Mise à jour finale ───────────────────────────────────────────────
-        if sl_hit:
+        if sl_hit and traded and pos_dir == 0:
+            # Entrée + SL sur la même bougie : enregistrer l'entrée maintenant,
+            # le SL sera exécuté sur la bougie suivante (sinon VBT ignore le trade)
+            pos_dir   = tmp_dir
+            level_idx = tmp_idx
+            avg_entry = tmp_avg
+            qty       = tmp_qty
+            target_size[i] = qty if pos_dir == 1 else -qty
+            exec_price[i]  = wp_sum / alloc_sum if alloc_sum > 0 else np.nan
+            pending_sl    = True
+            pending_sl_px = sl_px
+        elif sl_hit:
+            # SL sur position existante (pas de nouvelle entrée)
             target_size[i] = 0.0
             exec_price[i]  = sl_px
             pos_dir     = 0

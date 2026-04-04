@@ -125,7 +125,6 @@ def _imports():
         return out
 
     return (
-        PARAMS_BY_STRATEGY,
         compute_dsr,
         fmt_params,
         get_param_cols,
@@ -184,7 +183,6 @@ def _controls(glob_mod, mo, os):
         min_trades,
         min_wr,
         pattern_input,
-        refresh_btn,
     )
 
 
@@ -199,7 +197,6 @@ def _load_data(
     os,
     pair_from_filename,
     pattern_input,
-    refresh_btn,
 ):
     from concurrent.futures import ThreadPoolExecutor
 
@@ -450,7 +447,16 @@ def _section3(
 
 
 @app.cell
-def _section4(combo_scores, detected_params, fmt_params, mo, np, pairs, pd, valid_combos):
+def _section4(
+    combo_scores,
+    detected_params,
+    fmt_params,
+    mo,
+    np,
+    pairs,
+    pd,
+    valid_combos,
+):
     _rows = []
     for _pair in pairs:
         _vcs = valid_combos.get(_pair)
@@ -562,7 +568,7 @@ def _section5(compute_dsr, detected_params, mo, np, pairs, pd, test_data):
 
 
 @app.cell
-def _section_best_params(detected_params, mo, np, pd, plateau_df, stability_df):
+def _section_best_params(detected_params, mo, pd, plateau_df, stability_df):
     best_params_table = None
 
     _has_data = (
@@ -631,7 +637,6 @@ def _section_best_params(detected_params, mo, np, pd, plateau_df, stability_df):
                 mo.md("_Plateau + stabilité · **rec_score** = robustesse globale · clique sur une ligne pour pré-remplir le backtest_"),
                 best_params_table,
             ]))
-
     return (best_params_table,)
 
 
@@ -740,9 +745,17 @@ def _section6_heatmaps(
 
 
 @app.cell
-def _section7_main_controls(detected_strategy, mo, pairs):
-    bt_pair    = mo.ui.dropdown(options={p: p for p in pairs}, value=pairs[0] if pairs else None, label='Paire')
+def _section7_main_controls(best_params_table, detected_strategy, mo, pairs):
+    # Auto-fill paire depuis la sélection dans la table best_params
+    _default_pair = pairs[0] if pairs else None
+    if best_params_table is not None and len(best_params_table.value) > 0:
+        _sel_pair = best_params_table.value.iloc[0].get('paire')
+        if _sel_pair and _sel_pair in pairs:
+            _default_pair = _sel_pair
+
+    bt_pair    = mo.ui.dropdown(options={p: p for p in pairs}, value=_default_pair, label='Paire')
     bt_capital = mo.ui.number(value=10000, start=1000, stop=1_000_000, step=1000, label='Capital ($)')
+    bt_fees    = mo.ui.number(value=0.001, start=0.0, stop=0.01, step=0.0001, label='Fees par trade')
     run_btn    = mo.ui.button(label='▶ Lancer le backtest', on_click=lambda v: (v or 0) + 1, value=0)
 
     _strat_label = 'RAM DCA' if detected_strategy == 'ram' else 'Keltner Channel'
@@ -750,9 +763,9 @@ def _section7_main_controls(detected_strategy, mo, pairs):
     mo.output.replace(mo.vstack([
         mo.md("## 8. Backtest final interactif"),
         mo.callout(mo.md(f"Stratégie détectée depuis le pickle : **{_strat_label}**"), kind="info"),
-        mo.hstack([bt_pair, bt_capital, run_btn], justify="start", gap=2),
+        mo.hstack([bt_pair, bt_capital, bt_fees, run_btn], justify="start", gap=2),
     ]))
-    return bt_capital, bt_pair, run_btn
+    return bt_capital, bt_fees, bt_pair, run_btn
 
 
 @app.cell
@@ -761,7 +774,6 @@ def _section7_param_controls(
     combo_scores,
     detected_params,
     heatmap_click,
-    heatmap_pair,
     heatmap_x,
     heatmap_y,
     mo,
@@ -822,6 +834,7 @@ def _section7_backtest(
     bt_atrw,
     bt_capital,
     bt_env,
+    bt_fees,
     bt_ma,
     bt_pair,
     bt_sl,
@@ -879,10 +892,40 @@ def _section7_backtest(
         if _data is None:
             mo.stop(True, mo.callout(mo.md(f"Données introuvables pour `{_pair}` ({_exchange}/{_tf})"), kind="danger"))
 
+        _fees_override = float(bt_fees.value)
+        _fees_bps = _fees_override * 10000
+
         if _strategy == 'ram':
-            from src.strategies.ram_dca import run_backtest as _rb
-            _pf = _rb(_data, int(bt_ma.value), [float(bt_env.value)], [1.0], float(bt_sl.value))
-            _band_label = f'RAM DCA · ma={bt_ma.value} · env={float(bt_env.value)*100:.1f}% · sl={float(bt_sl.value)*100:.0f}%'
+            from src.strategies.ram_dca import run_backtest as _rb, ram_dca_nb as _ram_dca_nb
+            import numpy as _np
+            from config import SLIPPAGE as _SLIPPAGE7, INIT_CASH as _INIT_CASH7
+
+            # Recalcul du portfolio avec les fees du slider
+            _src = _data['close']
+            _ma_s = vbt.MA.run(_src, window=int(bt_ma.value)).ma
+            _env_val = float(bt_env.value)
+            _n_bars = len(_data)
+            _upper_envs = _np.zeros((1, _n_bars))
+            _lower_envs = _np.zeros((1, _n_bars))
+            _upper_envs[0] = (_ma_s * (1.0 + _env_val)).values
+            _lower_envs[0] = (_ma_s * (1.0 - _env_val)).values
+
+            _ts, _ep = _ram_dca_nb(
+                _data['high'].values, _data['low'].values, _data['close'].values,
+                _ma_s.values, _upper_envs, _lower_envs,
+                _np.array([1.0]), float(bt_sl.value),
+            )
+
+            _pf = vbt.Portfolio.from_orders(
+                close=_data['close'],
+                size=pd.Series(_ts, index=_data.index),
+                price=pd.Series(_ep, index=_data.index),
+                size_type='TargetPercent',
+                init_cash=_INIT_CASH7,
+                fees=_fees_override,
+                slippage=_SLIPPAGE7,
+            )
+            _band_label = f'RAM DCA · ma={bt_ma.value} · env={_env_val*100:.1f}% · sl={float(bt_sl.value)*100:.1f}% · fees={_fees_bps:.0f}bps'
         else:
             from src.strategies.keltner import run_backtest as _rb
             _pf = _rb(_data, int(bt_ma.value), int(bt_atrw.value), float(bt_atrm.value), float(bt_sl.value), size=1)
@@ -968,6 +1011,155 @@ def _section7_backtest(
             _cap_html,
             mo.md("---\n#### Rendements mensuels"),
             _mret_html,
+        ]))
+
+    except Exception as _e:
+        import traceback as _tb
+        mo.output.replace(mo.callout(mo.md(f"Erreur : `{_e}`\n```\n{_tb.format_exc()}\n```"), kind="danger"))
+    return
+
+
+@app.cell
+def _section9_controls(mo):
+    plot_btn = mo.ui.button(label='▶ Afficher le graphique interactif (3 derniers mois)', on_click=lambda v: (v or 0) + 1, value=0)
+    mo.output.replace(mo.vstack([
+        mo.md("## 9. Graphique interactif (OHLC + indicateurs + trades)"),
+        plot_btn,
+    ]))
+    return (plot_btn,)
+
+
+@app.cell
+def _section9_plot(
+    bt_env,
+    bt_fees,
+    bt_ma,
+    bt_pair,
+    bt_sl,
+    detected_strategy,
+    file_info,
+    go,
+    mo,
+    os,
+    pd,
+    plot_btn,
+    vbt,
+):
+    if not plot_btn.value:
+        mo.stop(True, mo.callout(mo.md("Clique sur le bouton ci-dessus pour générer le graphique."), kind="neutral"))
+
+    mo.output.replace(mo.callout(mo.md("Génération du graphique..."), kind="info"))
+
+    import sys as _sys
+    if '.' not in _sys.path:
+        _sys.path.insert(0, '.')
+
+    try:
+        _pair     = bt_pair.value
+        _strategy = detected_strategy
+        _info     = file_info.get(_pair)
+        _tf       = _info[2] if _info else '5m'
+        _exchange = _info[3] if _info else 'lighter'
+
+        _data = None
+        for _suf in ('.csv', 'USDT.csv'):
+            _path = f'data/raw/{_exchange}/{_tf}/{_pair}{_suf}'
+            if os.path.exists(_path):
+                _data = pd.read_csv(_path)
+                _data['date'] = pd.to_datetime(_data['date'], unit='ms')
+                _data = _data.set_index('date').sort_index()
+                break
+
+        if _data is None:
+            mo.stop(True, mo.callout(mo.md(f"Données introuvables pour `{_pair}`"), kind="danger"))
+
+        if _strategy != 'ram':
+            mo.stop(True, mo.callout(mo.md("Graphique interactif disponible uniquement pour RAM DCA."), kind="warn"))
+
+        # Backtest sur toutes les données avec fees du slider
+        from src.strategies.ram_dca import ram_dca_nb as _ram_dca_nb9
+        from config import SLIPPAGE as _SLIPPAGE9, INIT_CASH as _INIT_CASH9
+        import numpy as _np
+
+        _src = _data['close']
+        _ma_full = vbt.MA.run(_src, window=int(bt_ma.value)).ma
+        _env_val = float(bt_env.value)
+        _n_bars = len(_data)
+        _upper_envs = _np.zeros((1, _n_bars))
+        _lower_envs = _np.zeros((1, _n_bars))
+        _upper_envs[0] = (_ma_full * (1.0 + _env_val)).values
+        _lower_envs[0] = (_ma_full * (1.0 - _env_val)).values
+
+        _ts, _ep = _ram_dca_nb9(
+            _data['high'].values, _data['low'].values, _data['close'].values,
+            _ma_full.values, _upper_envs, _lower_envs,
+            _np.array([1.0]), float(bt_sl.value),
+        )
+
+        _pf = vbt.Portfolio.from_orders(
+            close=_data['close'],
+            size=pd.Series(_ts, index=_data.index),
+            price=pd.Series(_ep, index=_data.index),
+            size_type='TargetPercent',
+            init_cash=_INIT_CASH9,
+            fees=float(bt_fees.value),
+            slippage=_SLIPPAGE9,
+        )
+
+        # Plot VBT natif (equity + trades + ordres)
+        _fig = _pf.plot()
+
+        # Cacher la ligne Close simple de VBT
+        _fig.update_traces(selector=dict(name='Close'), visible=False)
+
+        # Limiter aux 3 derniers mois
+        _cutoff = _data.index.max() - pd.Timedelta(days=30)
+        _data_plot = _data[_data.index >= _cutoff]
+
+        # Ajouter les bougies OHLC
+        _fig.add_trace(go.Candlestick(
+            x=_data_plot.index,
+            open=_data_plot['open'],
+            high=_data_plot['high'],
+            low=_data_plot['low'],
+            close=_data_plot['close'],
+            name='OHLC',
+        ))
+
+        # MA + enveloppes
+        _ma = vbt.MA.run(_data_plot['close'], window=int(bt_ma.value)).ma
+        _env_val = float(bt_env.value)
+
+        _fig.add_trace(go.Scatter(
+            x=_ma.index, y=_ma.values,
+            name=f'SMA({bt_ma.value})',
+            line=dict(color='orange', width=1.5),
+        ))
+
+        _fig.add_trace(go.Scatter(
+            x=_ma.index, y=(_ma * (1 + _env_val)).values,
+            name=f'Upper {_env_val*100:.1f}%',
+            line=dict(color='blue', dash='dash'), opacity=0.3,
+        ))
+
+        _fig.add_trace(go.Scatter(
+            x=_ma.index, y=(_ma * (1 - _env_val)).values,
+            name=f'Lower {_env_val*100:.1f}%',
+            line=dict(color='blue', dash='dash'), opacity=0.3,
+        ))
+
+        # Zoom sur les 3 derniers mois
+        _fig.update_layout(
+            xaxis_rangeslider_visible=False,
+            xaxis_range=[_cutoff, _data.index.max()],
+            title=f'{_pair} — RAM DCA · ma={bt_ma.value} · env={_env_val*100:.1f}% · sl={float(bt_sl.value)*100:.1f}%',
+            height=800,
+        )
+
+        mo.output.replace(mo.vstack([
+            mo.md("## 9. Graphique interactif (3 derniers mois)"),
+            mo.callout(mo.md("Zoom/pan pour explorer · les trades VBT sont affichés nativement"), kind="info"),
+            mo.ui.plotly(_fig),
         ]))
 
     except Exception as _e:

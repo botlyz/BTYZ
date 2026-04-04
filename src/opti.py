@@ -1,6 +1,7 @@
 import sys
 import os
 import hashlib
+import requests
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from vectorbtpro import *
@@ -10,8 +11,27 @@ import questionary
 from questionary import Style
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Notifications Telegram
+# ─────────────────────────────────────────────────────────────────────────────
+
+TG_TOKEN   = '8045706367:AAF9MV280K9NitKUiQhcjwiR7uUUWWe02g8'
+TG_CHAT_ID = '1069067907'
+
+def tg_send(msg):
+    try:
+        requests.post(
+            f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
+            json={'chat_id': TG_CHAT_ID, 'text': msg, 'parse_mode': 'HTML'},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Grilles de paramètres
 # ─────────────────────────────────────────────────────────────────────────────
+
+RAM_ALLOC = 0.1  # allocation par trade (0.1 = 10% du capital)
 
 GRIDS = {
     'keltner': {
@@ -21,9 +41,9 @@ GRIDS = {
         'sl_stop':    list(np.arange(0.02, 0.11, 0.02)),
     },
     'ram': {
-        'ma_window': list(range(20, 320, 20)),
-        'env_pct':   [round(x, 4) for x in np.arange(0.005, 0.085, 0.005)],  # 0.5% → 8% step 0.5%
-        'sl_pct':    [round(x, 4) for x in np.arange(0.005, 0.085, 0.005)],  # 0.5% → 8% step 0.5%
+        'ma_window': list(range(20, 220, 20)),
+        'env_pct':   [round(x, 4) for x in np.arange(0.005, 0.085, 0.005)] + [round(x, 4) for x in np.arange(0.09, 0.125, 0.01)],
+        'sl_pct':    [round(x, 4) for x in np.arange(0.005, 0.085, 0.005)] + [round(x, 4) for x in np.arange(0.09, 0.125, 0.01)],
     },
 }
 
@@ -33,18 +53,22 @@ GRIDS = {
 
 def keltner_objective(data, ma_window, atr_window, atr_mult, sl_stop):
     try:
+        import warnings
+        warnings.filterwarnings('ignore')
         from src.strategies.keltner import run_backtest
         pf = run_backtest(data, ma_window, atr_window, atr_mult, sl_stop)
-        return pf.stats()
+        return pf.stats(silence_warnings=True)
     except Exception:
         return None
 
 
 def ram_objective(data, ma_window, env_pct, sl_pct):
     try:
+        import warnings
+        warnings.filterwarnings('ignore')
         from src.strategies.ram_dca import run_backtest
-        pf = run_backtest(data, ma_window, [env_pct], [1.0], sl_pct)
-        return pf.stats()
+        pf = run_backtest(data, ma_window, [env_pct], [RAM_ALLOC], sl_pct)
+        return pf.stats(silence_warnings=True)
     except Exception:
         return None
 
@@ -53,25 +77,41 @@ def ram_objective(data, ma_window, env_pct, sl_pct):
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def grid_hash(grid):
+def grid_dirname(strategy, grid):
     """
-    Retourne un identifiant court (8 hex) unique pour une grille de paramètres.
-    Inclut fees + slippage : changer la config crée un nouveau dossier cache.
-    Utilise json.dumps pour un sérialisation stable (pas de np.float64 dans str).
+    Nom de dossier lisible : strat_params_fees.
+    Ex: ram_ma20-300x15_env0.005-0.08x16_sl0.005-0.08x16_fees0bps_slip2bps
     """
-    import json
     from config import FEES, SLIPPAGE
-    canonical = {k: [round(float(x), 8) for x in sorted(v)] for k, v in grid.items()}
-    sig = json.dumps(canonical, sort_keys=True) + f'|fees={float(FEES)}|slip={float(SLIPPAGE)}'
-    h = hashlib.md5(sig.encode()).hexdigest()[:8]
-    return h
+
+    prefix = 'kc' if strategy == 'keltner' else 'ram'
+
+    # Résumé compact des params
+    param_parts = []
+    for k, v in grid.items():
+        vals = [round(float(x), 8) for x in sorted(v)]
+        name = k.replace('_window', '').replace('_pct', '').replace('_stop', '').replace('_mult', '')
+        lo = f'{vals[0]:.3f}'.rstrip('0').rstrip('.')
+        hi = f'{vals[-1]:.3f}'.rstrip('0').rstrip('.')
+        param_parts.append(f'{name}{lo}-{hi}x{len(vals)}')
+
+    fees_bps = int(round(float(FEES) * 10000))
+    slip_bps = int(round(float(SLIPPAGE) * 10000))
+    alloc_pct = int(round(RAM_ALLOC * 100))
+
+    return f'{prefix}_{"_".join(param_parts)}_alloc{alloc_pct}pct_fees{fees_bps}bps_slip{slip_bps}bps'
 
 
 def grid_summary(grid):
     """Résumé lisible de la grille : param min→max (n valeurs)."""
+    from config import FEES, SLIPPAGE
     parts = []
     for k, v in grid.items():
         parts.append(f"{k}: {v[0]}→{v[-1]} ({len(v)} valeurs)")
+    fees_bps = int(round(float(FEES) * 10000))
+    slip_bps = int(round(float(SLIPPAGE) * 10000))
+    parts.append(f"fees: {fees_bps}bps")
+    parts.append(f"slip: {slip_bps}bps")
     return '  |  '.join(parts)
 
 
@@ -99,10 +139,6 @@ def load_data(exchange, tf, pair):
 
 def run_opti(data, strategy, pair, tf, exchange, grid, cache_dir='./cache'):
     import gc
-    import multiprocessing
-    n_cpus    = multiprocessing.cpu_count()
-    n_workers = max(1, int(n_cpus * 0.8))
-    print(f"\nWorkers : {n_workers}/{n_cpus} (80%)")
 
     splitter = vbt.Splitter.from_n_rolling(
         data.index, n=10, length='optimize', split=0.7,
@@ -114,13 +150,7 @@ def run_opti(data, strategy, pair, tf, exchange, grid, cache_dir='./cache'):
     param_fn = vbt.parameterized(
         objective_fn,
         merge_func='concat',
-        execute_kwargs=dict(
-            chunk_len=n_workers,
-            distribute='chunks',
-            engine='pathos',
-            init_kwargs=dict(nodes=n_workers),
-            show_progress=True,
-        ),
+        execute_kwargs=dict(show_progress=True),
     )
     cv_fn = vbt.split(
         param_fn,
@@ -289,19 +319,35 @@ def menu():
         pairs = pairs_avail
 
     # 6. Récap + confirmation
+    from config import FEES, SLIPPAGE, INIT_CASH
     grid = GRIDS[strategy]
     n_combos = 1
     for v in grid.values():
         n_combos *= len(v)
+    fees_bps = int(round(float(FEES) * 10000))
+    slip_bps = int(round(float(SLIPPAGE) * 10000))
 
-    print(f"\n┌─────────────────────────────────────────┐")
-    print(f"│  Stratégie : {strategy:<28}│")
-    print(f"│  Exchange  : {exchange:<28}│")
-    print(f"│  Timeframe : {tf:<28}│")
-    print(f"│  Paires    : {len(pairs):<28}│")
-    print(f"│  Combos    : {n_combos:<28}│")
-    print(f"│  Backtests : {n_combos * 10 * 2:<28}│")
-    print(f"└─────────────────────────────────────────┘")
+    print(f"\n╔═══════════════════════════════════════════════╗")
+    print(f"║             RÉCAPITULATIF                     ║")
+    print(f"╠═══════════════════════════════════════════════╣")
+    print(f"║  Stratégie  : {strategy:<32}║")
+    print(f"║  Exchange   : {exchange:<32}║")
+    print(f"║  Timeframe  : {tf:<32}║")
+    print(f"║  Paires     : {len(pairs):<32}║")
+    print(f"╠═══════════════════════════════════════════════╣")
+    for k, v in grid.items():
+        lo = f'{v[0]}'
+        hi = f'{v[-1]}'
+        label = f'{k}: {lo} → {hi} ({len(v)} vals)'
+        print(f"║  {label:<44}║")
+    print(f"║  Combos     : {n_combos:<32}║")
+    print(f"║  Backtests  : {n_combos * 10 * 2:<32}║")
+    print(f"╠═══════════════════════════════════════════════╣")
+    print(f"║  Fees       : {fees_bps} bps ({FEES*100:.2f}% par trade){' '*(16-len(str(fees_bps)))}║")
+    print(f"║  Slippage   : {slip_bps} bps ({SLIPPAGE*100:.3f}% par trade){' '*(15-len(str(slip_bps)))}║")
+    print(f"║  Allocation : {int(RAM_ALLOC*100)}% du capital par trade{' '*(22-len(str(int(RAM_ALLOC*100))))}║")
+    print(f"║  Capital    : {INIT_CASH:,}${' '*(31-len(f'{INIT_CASH:,}'))}║")
+    print(f"╚═══════════════════════════════════════════════╝")
 
     ok = questionary.confirm("Lancer ?", default=True, style=STYLE).ask()
     if not ok:
@@ -317,18 +363,58 @@ def menu():
 
 if __name__ == '__main__':
     import time
+    import subprocess
+    import argparse
 
-    strategy, mode, exchange, tf, pairs, grid = menu()
+    # Nettoyage des workers zombies des runs précédents
+    _zombie = subprocess.run(
+        ['pgrep', '-f', 'python3 src/opti.py'],
+        capture_output=True, text=True
+    )
+    _pids = [p for p in _zombie.stdout.strip().split('\n') if p and int(p) != os.getpid()]
+    if _pids:
+        print(f"Nettoyage de {len(_pids)} workers zombies des runs précédents...")
+        subprocess.run(['kill', '-9'] + _pids, capture_output=True)
+        import time as _t; _t.sleep(2)
+        print("RAM libérée.")
 
-    gh = grid_hash(grid)
+    # Mode non-interactif : python3 src/opti.py --resume <cache_dir>
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--resume', type=str, help='Reprendre directement sur un cache_dir existant (skip menu)')
+    args, _ = parser.parse_known_args()
+
+    if args.resume:
+        # Déduire les params depuis le nom du dossier
+        cache_dir = args.resume
+        _base = os.path.basename(cache_dir)
+        prefix = 'kc_wfsl' if _base.startswith('kc_') else 'ram'
+        strategy = 'keltner' if prefix == 'kc_wfsl' else 'ram'
+        grid = GRIDS[strategy]
+
+        # Déduire exchange/tf depuis le parent
+        _parent = os.path.basename(os.path.dirname(cache_dir))  # full_lighter_5m
+        _parts = _parent.replace('full_', '').rsplit('_', 1)
+        exchange = _parts[0] if len(_parts) >= 2 else 'lighter'
+        tf = _parts[1] if len(_parts) >= 2 else '5m'
+
+        # Charger les paires depuis liquidity.json ou data
+        pairs = list_pairs(exchange, tf)
+        mode = 'full'
+
+        print(f"\n[RESUME] {cache_dir}")
+        print(f"Stratégie: {strategy} | Exchange: {exchange} | TF: {tf} | Paires: {len(pairs)}")
+    else:
+        strategy, mode, exchange, tf, pairs, grid = menu()
+
+    dirname = grid_dirname(strategy, grid)
     prefix = 'kc_wfsl' if strategy == 'keltner' else 'ram'
 
     if mode in ('full', 'liquid'):
-        cache_dir = f'./cache/full_{exchange}_{tf}/{prefix}_grid_{gh}'
+        cache_dir = f'./cache/full_{exchange}_{tf}/{dirname}'
     else:
-        cache_dir = f'./cache/{prefix}_grid_{gh}'
+        cache_dir = f'./cache/{dirname}'
 
-    print(f"\nGrille [{gh}] : {grid_summary(grid)}")
+    print(f"\nGrille : {grid_summary(grid)}")
     print(f"Cache → {cache_dir}/\n")
     os.makedirs(cache_dir, exist_ok=True)
 
@@ -347,31 +433,58 @@ if __name__ == '__main__':
         print("Rien à faire — tout est déjà dans le cache.")
         sys.exit(0)
 
-    print(f"\n{len(to_run)} paires à traiter, {skipped} skippées\n")
+    import multiprocessing
+    n_cpus = multiprocessing.cpu_count()
+    # Paralléliser au niveau des paires (pas des combos)
+    # Chaque paire tourne en serial → pas de deadlock interne
+    n_parallel = min(n_cpus, len(to_run))  # 1 paire par cœur, max = nb de paires restantes
+    print(f"\n{len(to_run)} paires à traiter, {skipped} skippées")
+    print(f"Parallélisme : {n_parallel} paires simultanées (serial par paire)\n")
+
+    def _process_pair(p):
+        """Traite une paire dans un process séparé."""
+        import warnings
+        warnings.filterwarnings('ignore')
+        _data = load_data(exchange, tf, p)
+        if _data is None:
+            return p, False, "Pas de data"
+        try:
+            run_opti(_data, strategy, p, tf, exchange, grid, cache_dir=cache_dir)
+            return p, True, "OK"
+        except Exception as _e:
+            return p, False, str(_e)
 
     t0 = time.time()
-    for i, p in enumerate(to_run):
-        elapsed = time.time() - t0
-        if i > 0:
-            eta = elapsed / i * (len(to_run) - i)
-            print(f"\n{'='*60}")
-            print(f"  GLOBAL: {i}/{len(to_run)} | ETA {int(eta//60)}m{int(eta%60):02d}s")
-        print(f"{'='*60}")
-        print(f"  >>> {p} {tf} {exchange}  [{i+1}/{len(to_run)}]")
-        print(f"{'='*60}")
+    done = 0
+    failed = []
 
-        data = load_data(exchange, tf, p)
-        if data is None:
-            print(f"  Pas de data pour {p}, skip")
-            continue
-        try:
-            run_opti(data, strategy, p, tf, exchange, grid, cache_dir=cache_dir)
-        except Exception as e:
-            print(f"\n  ERREUR sur {p} : {e} — skip et on continue")
-        del data
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    with ProcessPoolExecutor(max_workers=n_parallel) as pool:
+        futures = {pool.submit(_process_pair, p): p for p in to_run}
+        for future in as_completed(futures):
+            p = futures[future]
+            done += 1
+            elapsed = time.time() - t0
+            eta = elapsed / done * (len(to_run) - done) if done > 0 else 0
+            try:
+                pair, success, msg = future.result(timeout=30 * 60)
+                if success:
+                    print(f"  ✓ {pair} [{done}/{len(to_run)}] ETA {int(eta//60)}m{int(eta%60):02d}s")
+                else:
+                    print(f"  ✗ {pair} : {msg} [{done}/{len(to_run)}]")
+                    failed.append(pair)
+                    tg_send(f"⚠️ <b>Opti erreur</b> sur {pair}\n{msg}")
+            except Exception as e:
+                print(f"  ✗ {p} : {e} [{done}/{len(to_run)}]")
+                failed.append(p)
+                tg_send(f"⚠️ <b>Opti crash</b> sur {p}\n{e}")
 
     elapsed = time.time() - t0
     print(f"\n{'='*60}")
-    print(f"Terminé : {len(to_run)} paires en {int(elapsed//60)}m{int(elapsed%60):02d}s")
+    print(f"Terminé : {done} paires en {int(elapsed//60)}m{int(elapsed%60):02d}s")
+    if failed:
+        print(f"Échecs : {', '.join(failed)}")
     print(f"Résultats dans {cache_dir}/")
     print(f"{'='*60}")
+    tg_send(f"✅ <b>Opti terminée</b>\n{done}/{len(to_run)} paires en {int(elapsed//60)}m{int(eta%60):02d}s\nÉchecs: {len(failed)}\n→ {cache_dir}/")
