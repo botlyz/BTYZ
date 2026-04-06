@@ -152,12 +152,20 @@ def run_opti(data, strategy, pair, tf, exchange, grid, cache_dir='./cache'):
         merge_func='concat',
         execute_kwargs=dict(show_progress=True),
     )
+    _split_chunk_dir = os.path.join(cache_dir, '.split_chunks', pair)
+
     cv_fn = vbt.split(
         param_fn,
         splitter=splitter,
         takeable_args=['data'],
         merge_func='concat',
-        execute_kwargs=dict(show_progress=True),
+        execute_kwargs=dict(
+            show_progress=True,
+            cache_chunks=True,
+            chunk_cache_dir=_split_chunk_dir,
+            release_chunk_cache=True,
+            chunk_collect_garbage=True,
+        ),
     )
 
     param_grid = {k: vbt.Param(v) for k, v in grid.items()}
@@ -178,12 +186,26 @@ def run_opti(data, strategy, pair, tf, exchange, grid, cache_dir='./cache'):
     print(f"\nSauvegardé → {out_path}")
 
     del results, cv_fn, param_fn, splitter, param_grid
-    try:
-        from pathos.pools import _clear
-        _clear()
-    except Exception:
-        pass
+    vbt.clear_cache()
     gc.collect()
+
+    # Nettoyer les chunks temporaires
+    import shutil
+    shutil.rmtree(_split_chunk_dir, ignore_errors=True)
+
+
+def process_pair(p, strategy, exchange, tf, grid, cache_dir):
+    """Traite une paire dans un process séparé (appelé par ProcessPoolExecutor)."""
+    import warnings
+    warnings.filterwarnings('ignore')
+    _data = load_data(exchange, tf, p)
+    if _data is None:
+        return p, False, "Pas de data"
+    try:
+        run_opti(_data, strategy, p, tf, exchange, grid, cache_dir=cache_dir)
+        return p, True, "OK"
+    except Exception as _e:
+        return p, False, str(_e)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -437,22 +459,9 @@ if __name__ == '__main__':
     n_cpus = multiprocessing.cpu_count()
     # Paralléliser au niveau des paires (pas des combos)
     # Chaque paire tourne en serial → pas de deadlock interne
-    n_parallel = min(n_cpus, len(to_run))  # 1 paire par cœur, max = nb de paires restantes
+    n_parallel = min(n_cpus, len(to_run))  # 1 paire par cœur
     print(f"\n{len(to_run)} paires à traiter, {skipped} skippées")
     print(f"Parallélisme : {n_parallel} paires simultanées (serial par paire)\n")
-
-    def _process_pair(p):
-        """Traite une paire dans un process séparé."""
-        import warnings
-        warnings.filterwarnings('ignore')
-        _data = load_data(exchange, tf, p)
-        if _data is None:
-            return p, False, "Pas de data"
-        try:
-            run_opti(_data, strategy, p, tf, exchange, grid, cache_dir=cache_dir)
-            return p, True, "OK"
-        except Exception as _e:
-            return p, False, str(_e)
 
     t0 = time.time()
     done = 0
@@ -460,8 +469,8 @@ if __name__ == '__main__':
 
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
-    with ProcessPoolExecutor(max_workers=n_parallel) as pool:
-        futures = {pool.submit(_process_pair, p): p for p in to_run}
+    with ProcessPoolExecutor(max_workers=n_parallel, max_tasks_per_child=1) as pool:
+        futures = {pool.submit(process_pair, p, strategy, exchange, tf, grid, cache_dir): p for p in to_run}
         for future in as_completed(futures):
             p = futures[future]
             done += 1

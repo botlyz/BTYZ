@@ -22,7 +22,7 @@ while [ $RETRY -lt $MAX_RETRIES ]; do
     if [ $RETRY -eq 0 ]; then
         echo "  Lancement interactif..."
         echo "══════════════════════════════════════════"
-        python3 src/opti.py
+        .venv/bin/python3 src/opti.py
         EXIT_CODE=$?
     else
         echo "  RELANCE #$RETRY (après crash)"
@@ -36,11 +36,11 @@ while [ $RETRY -lt $MAX_RETRIES ]; do
 
         if [ -n "$CACHE_DIR" ] && [ -d "$CACHE_DIR" ]; then
             echo "  Resume → $CACHE_DIR"
-            python3 src/opti.py --resume "$CACHE_DIR"
+            .venv/bin/python3 src/opti.py --resume "$CACHE_DIR"
             EXIT_CODE=$?
         else
             echo "  Pas de cache_dir, relance interactive..."
-            python3 src/opti.py
+            .venv/bin/python3 src/opti.py
             EXIT_CODE=$?
         fi
     fi
