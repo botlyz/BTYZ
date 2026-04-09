@@ -45,6 +45,18 @@ GRIDS = {
         'env_pct':   [round(x, 4) for x in np.arange(0.005, 0.085, 0.005)] + [round(x, 4) for x in np.arange(0.09, 0.125, 0.01)],
         'sl_pct':    [round(x, 4) for x in np.arange(0.005, 0.085, 0.005)] + [round(x, 4) for x in np.arange(0.09, 0.125, 0.01)],
     },
+    'ram_vol': {
+        'ma_window':  list(range(20, 220, 20)),
+        'env_pct':    [round(x, 4) for x in np.arange(0.005, 0.085, 0.005)] + [round(x, 4) for x in np.arange(0.09, 0.125, 0.01)],
+        'sl_pct':     [round(x, 4) for x in np.arange(0.005, 0.085, 0.005)] + [round(x, 4) for x in np.arange(0.09, 0.125, 0.01)],
+        'vol_window': [0, 7, 30, 90],
+    },
+    'ram_rsi': {
+        'ma_window':   list(range(20, 220, 20)),
+        'env_pct':     [round(x, 4) for x in np.arange(0.005, 0.085, 0.005)] + [round(x, 4) for x in np.arange(0.09, 0.125, 0.01)],
+        'sl_pct':      [round(x, 4) for x in np.arange(0.005, 0.085, 0.005)] + [round(x, 4) for x in np.arange(0.09, 0.125, 0.01)],
+        'rsi_filter':  [0, 1, 2, 3],
+    },
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -73,6 +85,28 @@ def ram_objective(data, ma_window, env_pct, sl_pct):
         return None
 
 
+def ram_vol_objective(data, ma_window, env_pct, sl_pct, vol_window):
+    try:
+        import warnings
+        warnings.filterwarnings('ignore')
+        from src.strategies.ram_dca_vol import run_backtest
+        pf = run_backtest(data, ma_window, [env_pct], [RAM_ALLOC], sl_pct, vol_window=int(vol_window))
+        return pf.stats(silence_warnings=True)
+    except Exception:
+        return None
+
+
+def ram_rsi_objective(data, ma_window, env_pct, sl_pct, rsi_filter):
+    try:
+        import warnings
+        warnings.filterwarnings('ignore')
+        from src.strategies.ram_dca_rsi import run_backtest
+        pf = run_backtest(data, ma_window, [env_pct], [RAM_ALLOC], sl_pct, rsi_filter=int(rsi_filter))
+        return pf.stats(silence_warnings=True)
+    except Exception:
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -84,7 +118,8 @@ def grid_dirname(strategy, grid):
     """
     from config import FEES, SLIPPAGE
 
-    prefix = 'kc' if strategy == 'keltner' else 'ram'
+    _prefix_map = {'keltner': 'kc', 'ram': 'ram', 'ram_vol': 'ram_vol', 'ram_rsi': 'ram_rsi'}
+    prefix = _prefix_map.get(strategy, 'ram')
 
     # Résumé compact des params
     param_parts = []
@@ -145,7 +180,13 @@ def run_opti(data, strategy, pair, tf, exchange, grid, cache_dir='./cache'):
         optimize_anchor_set=1, set_labels=['train', 'test']
     )
 
-    objective_fn = keltner_objective if strategy == 'keltner' else ram_objective
+    _obj_map = {
+        'keltner': keltner_objective,
+        'ram': ram_objective,
+        'ram_vol': ram_vol_objective,
+        'ram_rsi': ram_rsi_objective,
+    }
+    objective_fn = _obj_map[strategy]
 
     param_fn = vbt.parameterized(
         objective_fn,
@@ -180,7 +221,8 @@ def run_opti(data, strategy, pair, tf, exchange, grid, cache_dir='./cache'):
     results = cv_fn(data, **param_grid)
 
     os.makedirs(cache_dir, exist_ok=True)
-    prefix   = 'kc_wfsl' if strategy == 'keltner' else 'ram'
+    _pf_map = {'keltner': 'kc_wfsl', 'ram': 'ram', 'ram_vol': 'ram_vol', 'ram_rsi': 'ram_rsi'}
+    prefix   = _pf_map.get(strategy, 'ram')
     out_path = f'{cache_dir}/{prefix}_{pair}_{tf}_{exchange}.pickle'
     vbt.save(results, out_path)
     print(f"\nSauvegardé → {out_path}")
@@ -232,8 +274,10 @@ def menu():
     strategy = questionary.select(
         "Stratégie :",
         choices=[
-            questionary.Choice("Keltner Channel  (EMA + ATR)",  value='keltner'),
-            questionary.Choice("RAM DCA          (SMA + enveloppe + SL)", value='ram'),
+            questionary.Choice("Keltner Channel  (EMA + ATR)",              value='keltner'),
+            questionary.Choice("RAM DCA          (SMA + enveloppe + SL)",   value='ram'),
+            questionary.Choice("RAM DCA + Vol    (+ filtre ATR médiane)",   value='ram_vol'),
+            questionary.Choice("RAM DCA + RSI    (+ filtre RSI neutre)",    value='ram_rsi'),
         ],
         style=STYLE,
     ).ask()
@@ -409,8 +453,18 @@ if __name__ == '__main__':
         # Déduire les params depuis le nom du dossier
         cache_dir = args.resume
         _base = os.path.basename(cache_dir)
-        prefix = 'kc_wfsl' if _base.startswith('kc_') else 'ram'
-        strategy = 'keltner' if prefix == 'kc_wfsl' else 'ram'
+        if _base.startswith('kc_'):
+            prefix = 'kc_wfsl'
+            strategy = 'keltner'
+        elif _base.startswith('ram_rsi'):
+            prefix = 'ram_rsi'
+            strategy = 'ram_rsi'
+        elif _base.startswith('ram_vol'):
+            prefix = 'ram_vol'
+            strategy = 'ram_vol'
+        else:
+            prefix = 'ram'
+            strategy = 'ram'
         grid = GRIDS[strategy]
 
         # Déduire exchange/tf depuis le parent
@@ -429,7 +483,8 @@ if __name__ == '__main__':
         strategy, mode, exchange, tf, pairs, grid = menu()
 
     dirname = grid_dirname(strategy, grid)
-    prefix = 'kc_wfsl' if strategy == 'keltner' else 'ram'
+    _pf_map2 = {'keltner': 'kc_wfsl', 'ram': 'ram', 'ram_vol': 'ram_vol', 'ram_rsi': 'ram_rsi'}
+    prefix = _pf_map2.get(strategy, 'ram')
 
     if mode in ('full', 'liquid'):
         cache_dir = f'./cache/full_{exchange}_{tf}/{dirname}'
