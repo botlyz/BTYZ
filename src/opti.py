@@ -53,8 +53,8 @@ GRIDS = {
     },
     'ram_rsi': {
         'ma_window':   list(range(20, 220, 20)),
-        'env_pct':     [round(x, 4) for x in np.arange(0.005, 0.085, 0.005)] + [round(x, 4) for x in np.arange(0.09, 0.125, 0.01)],
-        'sl_pct':      [round(x, 4) for x in np.arange(0.005, 0.085, 0.005)] + [round(x, 4) for x in np.arange(0.09, 0.125, 0.01)],
+        'env_pct':     [round(x, 4) for x in np.arange(0.015, 0.085, 0.005)] + [round(x, 4) for x in np.arange(0.09, 0.125, 0.01)],
+        'sl_pct':      [round(x, 4) for x in np.arange(0.02, 0.085, 0.005)] + [round(x, 4) for x in np.arange(0.09, 0.125, 0.01)],
         'rsi_filter':  [0, 1, 2, 3],
     },
 }
@@ -172,82 +172,185 @@ def load_data(exchange, tf, pair):
     return None
 
 
-def run_opti(data, strategy, pair, tf, exchange, grid, cache_dir='./cache'):
-    import gc
-
-    splitter = vbt.Splitter.from_n_rolling(
-        data.index, n=10, length='optimize', split=0.7,
-        optimize_anchor_set=1, set_labels=['train', 'test']
-    )
-
-    _obj_map = {
-        'keltner': keltner_objective,
-        'ram': ram_objective,
-        'ram_vol': ram_vol_objective,
-        'ram_rsi': ram_rsi_objective,
-    }
-    objective_fn = _obj_map[strategy]
-
-    param_fn = vbt.parameterized(
-        objective_fn,
-        merge_func='concat',
-        execute_kwargs=dict(show_progress=True),
-    )
-    _split_chunk_dir = os.path.join(cache_dir, '.split_chunks', pair)
-
-    cv_fn = vbt.split(
-        param_fn,
-        splitter=splitter,
-        takeable_args=['data'],
-        merge_func='concat',
-        execute_kwargs=dict(
-            show_progress=True,
-            cache_chunks=True,
-            chunk_cache_dir=_split_chunk_dir,
-            release_chunk_cache=True,
-            chunk_collect_garbage=True,
-        ),
-    )
-
-    param_grid = {k: vbt.Param(v) for k, v in grid.items()}
+def _chunk_grid(grid, max_combos=1500):
+    """Découpe une grille en sous-grilles de max_combos combos.
+    Chunke récursivement si un seul paramètre ne suffit pas."""
 
     n_combos = 1
     for v in grid.values():
         n_combos *= len(v)
-    print(f"Combos : {n_combos}")
-    print(f"Total backtests : {n_combos * splitter.n_splits * 2}")
-    print("Lancement...\n")
 
-    results = cv_fn(data, **param_grid)
+    if n_combos <= max_combos:
+        return [grid]
 
-    os.makedirs(cache_dir, exist_ok=True)
+    # Trier les params par nombre de valeurs décroissant
+    sorted_keys = sorted(grid.keys(), key=lambda k: len(grid[k]), reverse=True)
+
+    # Chunker sur le plus gros param
+    chunk_key = sorted_keys[0]
+    chunk_vals = grid[chunk_key]
+    other_combos = n_combos // len(chunk_vals)
+
+    vals_per_chunk = max(1, max_combos // other_combos)
+    chunks = []
+    for i in range(0, len(chunk_vals), vals_per_chunk):
+        sub_grid = dict(grid)
+        sub_grid[chunk_key] = chunk_vals[i:i + vals_per_chunk]
+
+        # Vérifier si le sous-chunk est encore trop gros → récursion
+        sub_n = 1
+        for v in sub_grid.values():
+            sub_n *= len(v)
+        if sub_n > max_combos:
+            chunks.extend(_chunk_grid(sub_grid, max_combos))
+        else:
+            chunks.append(sub_grid)
+
+    return chunks
+
+
+def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
+    """Traite UN chunk d'UNE paire."""
+    import warnings, gc, shutil, time as _time
+    warnings.filterwarnings('ignore')
+
+    from vectorbtpro import vbt as _vbt
+    import psutil as _ps
+
+    _pid = os.getpid()
+    _proc = _ps.Process(_pid)
+    _t0 = _time.time()
+
+    def _log(msg):
+        _ram = _proc.memory_info().rss / 1024 / 1024
+        _sys_ram = _ps.virtual_memory().percent
+        _elapsed = _time.time() - _t0
+        print(f"  [{pair}:c{chunk_idx}|PID {_pid}|{_ram:.0f}MB|sys {_sys_ram:.0f}%|{_elapsed:.0f}s] {msg}", flush=True)
+
     _pf_map = {'keltner': 'kc_wfsl', 'ram': 'ram', 'ram_vol': 'ram_vol', 'ram_rsi': 'ram_rsi'}
-    prefix   = _pf_map.get(strategy, 'ram')
-    out_path = f'{cache_dir}/{prefix}_{pair}_{tf}_{exchange}.pickle'
-    vbt.save(results, out_path)
-    print(f"\nSauvegardé → {out_path}")
+    prefix = _pf_map.get(strategy, 'ram')
+    _chunk_save_dir = os.path.join(cache_dir, '.grid_chunks', pair)
+    os.makedirs(_chunk_save_dir, exist_ok=True)
+    _chunk_pickle = os.path.join(_chunk_save_dir, f'chunk_{chunk_idx}.pickle')
 
-    del results, cv_fn, param_fn, splitter, param_grid
-    vbt.clear_cache()
+    if os.path.exists(_chunk_pickle):
+        return pair, chunk_idx, True, "skip"
+
+    _log("load data")
+    _data = load_data(exchange, tf, pair)
+    if _data is None:
+        return pair, chunk_idx, False, "Pas de data"
+
+    try:
+        _obj_map = {
+            'keltner': keltner_objective,
+            'ram': ram_objective,
+            'ram_vol': ram_vol_objective,
+            'ram_rsi': ram_rsi_objective,
+        }
+        objective_fn = _obj_map[strategy]
+
+        sub_n = 1
+        for v in sub_grid.values():
+            sub_n *= len(v)
+        _log(f"start {sub_n} combos × 10 splits")
+
+        splitter = _vbt.Splitter.from_n_rolling(
+            _data.index, n=10, length='optimize', split=0.7,
+            optimize_anchor_set=1, set_labels=['train', 'test']
+        )
+
+        param_fn = _vbt.parameterized(
+            objective_fn,
+            merge_func='concat',
+            execute_kwargs=dict(show_progress=True),
+        )
+        _split_chunk_dir = os.path.join(cache_dir, '.split_chunks', pair, f'chunk_{chunk_idx}')
+
+        cv_fn = _vbt.split(
+            param_fn,
+            splitter=splitter,
+            takeable_args=['data'],
+            merge_func='concat',
+            execute_kwargs=dict(
+                show_progress=True,
+                cache_chunks=True,
+                chunk_cache_dir=_split_chunk_dir,
+                release_chunk_cache=True,
+                chunk_collect_garbage=True,
+            ),
+        )
+
+        param_grid = {k: _vbt.Param(v) for k, v in sub_grid.items()}
+        chunk_results = cv_fn(_data, **param_grid)
+
+        _log("save pickle")
+        _vbt.save(chunk_results, _chunk_pickle)
+
+        _log("cleanup")
+        del chunk_results, cv_fn, param_fn, param_grid, splitter, _data
+        _vbt.flush()
+        gc.collect()
+        shutil.rmtree(_split_chunk_dir, ignore_errors=True)
+
+        _log("done")
+        return pair, chunk_idx, True, "OK"
+    except Exception as _e:
+        _log(f"ERROR: {_e}")
+        try:
+            del _data
+        except Exception:
+            pass
+        _vbt.flush()
+        gc.collect()
+        return pair, chunk_idx, False, str(_e)
+
+
+def _process_chunk_wrapper(args):
+    """Wrapper pour imap_unordered (prend un seul tuple)."""
+    return process_chunk(*args)
+
+
+def assemble_pair(pair, strategy, cache_dir):
+    """Assemble les chunks d'une paire en un seul pickle final."""
+    import gc
+    _pf_map = {'keltner': 'kc_wfsl', 'ram': 'ram', 'ram_vol': 'ram_vol', 'ram_rsi': 'ram_rsi'}
+    prefix = _pf_map.get(strategy, 'ram')
+    _chunk_save_dir = os.path.join(cache_dir, '.grid_chunks', pair)
+
+    if not os.path.isdir(_chunk_save_dir):
+        return
+
+    _chunk_files = sorted(f for f in os.listdir(_chunk_save_dir) if f.endswith('.pickle'))
+    if not _chunk_files:
+        return
+
+    if len(_chunk_files) == 1:
+        results = vbt.load(os.path.join(_chunk_save_dir, _chunk_files[0]))
+    else:
+        _parts = []
+        for cf in _chunk_files:
+            _parts.append(vbt.load(os.path.join(_chunk_save_dir, cf)))
+        results = pd.concat(_parts)
+        del _parts
+        gc.collect()
+
+    out_path = f'{cache_dir}/{prefix}_{pair}_5m_{os.path.basename(os.path.dirname(cache_dir)).split("_")[1] if "full_" in cache_dir else "lighter"}.pickle'
+    # Déduire exchange/tf depuis le cache_dir
+    _parent = os.path.basename(os.path.dirname(cache_dir))
+    _parts_dir = _parent.replace('full_', '').rsplit('_', 1)
+    _exchange = _parts_dir[0] if len(_parts_dir) >= 2 else 'lighter'
+    _tf = _parts_dir[1] if len(_parts_dir) >= 2 else '5m'
+    out_path = f'{cache_dir}/{prefix}_{pair}_{_tf}_{_exchange}.pickle'
+
+    vbt.save(results, out_path)
+    print(f"  Assemblé → {out_path}")
+
+    del results
     gc.collect()
 
-    # Nettoyer les chunks temporaires
     import shutil
-    shutil.rmtree(_split_chunk_dir, ignore_errors=True)
-
-
-def process_pair(p, strategy, exchange, tf, grid, cache_dir):
-    """Traite une paire dans un process séparé (appelé par ProcessPoolExecutor)."""
-    import warnings
-    warnings.filterwarnings('ignore')
-    _data = load_data(exchange, tf, p)
-    if _data is None:
-        return p, False, "Pas de data"
-    try:
-        run_opti(_data, strategy, p, tf, exchange, grid, cache_dir=cache_dir)
-        return p, True, "OK"
-    except Exception as _e:
-        return p, False, str(_e)
+    shutil.rmtree(_chunk_save_dir, ignore_errors=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -495,7 +598,7 @@ if __name__ == '__main__':
     print(f"Cache → {cache_dir}/\n")
     os.makedirs(cache_dir, exist_ok=True)
 
-    # Filtrer les paires déjà dans le cache
+    # Filtrer les paires déjà dans le cache (pickle final existe)
     to_run  = []
     skipped = 0
     for p in pairs:
@@ -510,45 +613,215 @@ if __name__ == '__main__':
         print("Rien à faire — tout est déjà dans le cache.")
         sys.exit(0)
 
+    # Chunker la grille
+    grid_chunks = _chunk_grid(grid, max_combos=100)
+    n_chunks = len(grid_chunks)
+    n_combos = 1
+    for v in grid.values():
+        n_combos *= len(v)
+
+    # Construire la liste de tâches : (pair, chunk_idx, sub_grid)
+    tasks = []
+    for p in to_run:
+        for chunk_idx, sub_grid in enumerate(grid_chunks):
+            tasks.append((p, chunk_idx, sub_grid))
+
+    print(f"\n{len(to_run)} paires × {n_chunks} chunks = {len(tasks)} tâches")
+    print(f"Combos/chunk : ~{n_combos // n_chunks} | Total combos/paire : {n_combos}")
+
     import multiprocessing
     n_cpus = multiprocessing.cpu_count()
-    # Paralléliser au niveau des paires (pas des combos)
-    # Chaque paire tourne en serial → pas de deadlock interne
-    n_parallel = min(n_cpus, len(to_run))  # 1 paire par cœur
-    print(f"\n{len(to_run)} paires à traiter, {skipped} skippées")
-    print(f"Parallélisme : {n_parallel} paires simultanées (serial par paire)\n")
+    _max_by_ram = n_cpus
+    n_parallel = min(n_cpus, len(tasks), _max_by_ram)
+    print(f"Parallélisme : {n_parallel} workers (1 chunk par worker, process meurt après)\n")
 
     t0 = time.time()
-    done = 0
+    done_chunks = 0
     failed = []
 
-    from concurrent.futures import ProcessPoolExecutor, as_completed
+    import signal
+    import multiprocessing as _mp
+    import psutil
+    import gc as _gc
 
-    with ProcessPoolExecutor(max_workers=n_parallel, max_tasks_per_child=1) as pool:
-        futures = {pool.submit(process_pair, p, strategy, exchange, tf, grid, cache_dir): p for p in to_run}
-        for future in as_completed(futures):
-            p = futures[future]
-            done += 1
-            elapsed = time.time() - t0
-            eta = elapsed / done * (len(to_run) - done) if done > 0 else 0
+    _task_args = [
+        (p, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir)
+        for p, chunk_idx, sub_grid in tasks
+    ]
+
+    def _sigint_handler(sig, frame):
+        print("\n\nCtrl+C reçu — arrêt...")
+        # Tuer tous les subprocess python3 -c (nos workers)
+        subprocess.run(['pkill', '-9', '-f', 'process_chunk'], capture_output=True)
+        subprocess.run(['pkill', '-9', '-P', str(os.getpid())], capture_output=True)
+        sys.exit(1)
+    signal.signal(signal.SIGINT, _sigint_handler)
+
+    # Log file
+    _log_path = os.path.join(cache_dir, 'opti.log')
+    def _main_log(msg):
+        _ram = psutil.virtual_memory()
+        _ts = time.strftime('%H:%M:%S')
+        _line = f"[{_ts}|RAM {_ram.used/1024**3:.1f}/{_ram.total/1024**3:.0f}G ({_ram.percent:.0f}%)] {msg}"
+        print(_line)
+        with open(_log_path, 'a') as _f:
+            _f.write(_line + '\n')
+
+    # Chaque chunk = un subprocess Python indépendant qui meurt après.
+    # ThreadPoolExecutor gère 24 subprocess en parallèle.
+    # Quand un subprocess finit → l'OS récupère TOUTE sa RAM → pas de fuite.
+    import json as _json
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _run_chunk_subprocess(task_arg):
+        pair, cidx, sub_grid, strat, exch, _tf, cdir = task_arg
+
+        # Sérialiser sub_grid en fichier JSON temporaire
+        _grid_dir = os.path.join(cdir, '.grid_chunks', pair)
+        os.makedirs(_grid_dir, exist_ok=True)
+        _grid_file = os.path.join(_grid_dir, f'_grid_{cidx}.json')
+        _clean = {}
+        for k, v in sub_grid.items():
+            _clean[k] = [int(x) if isinstance(x, (int, np.integer)) else float(x) for x in v]
+        with open(_grid_file, 'w') as f:
+            _json.dump(_clean, f)
+
+        _script = (
+            f'import sys,os,warnings,gc;'
+            f'sys.path.insert(0,"{os.getcwd()}");'
+            f'warnings.filterwarnings("ignore");'
+            f'import json;'
+            f'from src.opti import process_chunk;'
+            f'f=open("{_grid_file}");sg=json.load(f);f.close();'
+            f'p,c,ok,msg=process_chunk("{pair}",{cidx},sg,"{strat}","{exch}","{_tf}","{cdir}");'
+            f'print(f"RESULT:{{p}}:{{c}}:{{ok}}:{{msg}}")'
+        )
+
+        try:
+            result = subprocess.run(
+                [sys.executable, '-c', _script],
+                capture_output=True, text=True, timeout=60*60,
+            )
             try:
-                pair, success, msg = future.result(timeout=30 * 60)
-                if success:
-                    print(f"  ✓ {pair} [{done}/{len(to_run)}] ETA {int(eta//60)}m{int(eta%60):02d}s")
-                else:
-                    print(f"  ✗ {pair} : {msg} [{done}/{len(to_run)}]")
-                    failed.append(pair)
-                    tg_send(f"⚠️ <b>Opti erreur</b> sur {pair}\n{msg}")
-            except Exception as e:
-                print(f"  ✗ {p} : {e} [{done}/{len(to_run)}]")
-                failed.append(p)
-                tg_send(f"⚠️ <b>Opti crash</b> sur {p}\n{e}")
+                os.remove(_grid_file)
+            except Exception:
+                pass
+
+            for line in result.stdout.strip().split('\n'):
+                if line.startswith('RESULT:'):
+                    parts = line[7:].split(':', 3)
+                    return parts[0], int(parts[1]), parts[2] == 'True', parts[3]
+
+            _err = result.stderr[-500:] if result.stderr else "no output"
+            return pair, cidx, False, f"subprocess error: {_err}"
+        except subprocess.TimeoutExpired:
+            return pair, cidx, False, "timeout 60min"
+        except Exception as e:
+            return pair, cidx, False, str(e)
+
+    from tqdm import tqdm
+
+    _main_log(f"Démarrage : {len(tasks)} tasks, {n_parallel} subprocess en parallèle")
+
+    # Compteurs par paire pour la barre paire
+    _pair_chunks_total = {}
+    _pair_chunks_done = {}
+    for p, cidx, _ in tasks:
+        _pair_chunks_total[p] = _pair_chunks_total.get(p, 0) + 1
+        _pair_chunks_done[p] = 0
+    _progress = {'pairs_done': 0}
+    _current_pairs = set()
+
+    # Double barre : totale + paire en cours
+    _first_pair = to_run[0]
+    pbar_total = tqdm(total=len(tasks), desc="Total", position=0,
+                      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} chunks [{elapsed}<{remaining}] RAM:{postfix}')
+    pbar_pair = tqdm(total=n_chunks, desc=f"{_first_pair} (0/{len(to_run)} paires)", position=1,
+                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}')
+
+    def _update_bars(_pair, _cidx, success, msg):
+        ram = psutil.virtual_memory()
+        ram_str = f" {ram.used/1024**3:.0f}/{ram.total/1024**3:.0f}G ({ram.percent:.0f}%)"
+
+        # Update total
+        pbar_total.update(1)
+        pbar_total.set_postfix_str(ram_str)
+
+        # Update paire
+        _pair_chunks_done[_pair] = _pair_chunks_done.get(_pair, 0) + 1
+        _current_pairs.add(_pair)
+
+        # Trouver la paire la plus active
+        _active = max(_current_pairs, key=lambda p: _pair_chunks_done.get(p, 0))
+        _done_p = _pair_chunks_done[_active]
+        _total_p = _pair_chunks_total[_active]
+
+        if _done_p >= _total_p:
+            _progress['pairs_done'] += 1
+            _current_pairs.discard(_active)
+
+        pbar_pair.reset(total=_total_p)
+        pbar_pair.n = _done_p
+        pbar_pair.set_description(f"{_active} ({_progress['pairs_done']}/{len(to_run)} paires)")
+        pbar_pair.set_postfix_str("✓" if success else f"✗ {msg}")
+        pbar_pair.refresh()
+
+        # Log fichier
+        status = "✓" if success else f"✗ {msg}"
+        _main_log(f"{status} {_pair} chunk {_cidx+1}/{n_chunks} [{pbar_total.n}/{len(tasks)}]")
+
+    try:
+        with ThreadPoolExecutor(max_workers=n_parallel) as executor:
+            futures = {executor.submit(_run_chunk_subprocess, ta): ta for ta in _task_args}
+            for future in as_completed(futures):
+                try:
+                    _pair, _cidx, success, msg = future.result()
+                    _update_bars(_pair, _cidx, success, msg)
+                    if not success:
+                        failed.append(f"{_pair}/chunk{_cidx}")
+                except Exception as e:
+                    _main_log(f"✗ erreur : {e}")
+                    failed.append("unknown")
+                    pbar_total.update(1)
+
+                ram_pct = psutil.virtual_memory().percent
+                if ram_pct > 90:
+                    _main_log(f"🚨 RAM CRITIQUE {ram_pct:.0f}% — ARRÊT")
+                    tg_send(f"🚨 Opti arrêtée — RAM {ram_pct:.0f}%")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    subprocess.run(['pkill', '-9', '-P', str(os.getpid())], capture_output=True)
+                    break
+
+    except KeyboardInterrupt:
+        print("\nArrêt en cours...")
+        subprocess.run(['pkill', '-9', '-f', 'process_chunk'], capture_output=True)
+        subprocess.run(['pkill', '-9', '-P', str(os.getpid())], capture_output=True)
+        sys.exit(1)
+    finally:
+        pbar_total.close()
+        pbar_pair.close()
+
+    # Phase 2 : Assembler les chunks en pickles finaux (séquentiel, rapide)
+    print(f"\nAssemblage des chunks...")
+    assembled = 0
+    for p in to_run:
+        out = f'{cache_dir}/{prefix}_{p}_{tf}_{exchange}.pickle'
+        if os.path.exists(out):
+            continue
+        _chunk_dir = os.path.join(cache_dir, '.grid_chunks', p)
+        _expected = [f'chunk_{i}.pickle' for i in range(n_chunks)]
+        _existing = [f for f in _expected if os.path.exists(os.path.join(_chunk_dir, f))]
+        if len(_existing) == n_chunks:
+            assemble_pair(p, strategy, cache_dir)
+            assembled += 1
+        else:
+            print(f"  ⚠ {p} : {len(_existing)}/{n_chunks} chunks — incomplet, skip")
 
     elapsed = time.time() - t0
     print(f"\n{'='*60}")
-    print(f"Terminé : {done} paires en {int(elapsed//60)}m{int(elapsed%60):02d}s")
+    print(f"Terminé : {assembled} paires assemblées, {done_chunks} chunks en {int(elapsed//60)}m{int(elapsed%60):02d}s")
     if failed:
         print(f"Échecs : {', '.join(failed)}")
     print(f"Résultats dans {cache_dir}/")
     print(f"{'='*60}")
-    tg_send(f"✅ <b>Opti terminée</b>\n{done}/{len(to_run)} paires en {int(elapsed//60)}m{int(eta%60):02d}s\nÉchecs: {len(failed)}\n→ {cache_dir}/")
+    tg_send(f"✅ <b>Opti terminée</b>\n{assembled}/{len(to_run)} paires en {int(elapsed//60)}m{int(elapsed%60):02d}s\nÉchecs: {len(failed)}\n→ {cache_dir}/")
