@@ -210,13 +210,12 @@ def _chunk_grid(grid, max_combos=1500):
 
 
 def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
-    """Traite UN chunk d'UNE paire dans un worker Pool."""
-    import warnings, gc, shutil, ctypes
+    """Traite UN chunk d'UNE paire dans un worker Pool. Pas de cleanup — le Pool est recyclé."""
+    import warnings, shutil
     warnings.filterwarnings('ignore')
 
     from vectorbtpro import vbt as _vbt
 
-    _pf_map = {'keltner': 'kc_wfsl', 'ram': 'ram', 'ram_vol': 'ram_vol', 'ram_rsi': 'ram_rsi'}
     _chunk_save_dir = os.path.join(cache_dir, '.grid_chunks', pair)
     os.makedirs(_chunk_save_dir, exist_ok=True)
     _chunk_pickle = os.path.join(_chunk_save_dir, f'chunk_{chunk_idx}.pickle')
@@ -268,28 +267,12 @@ def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
 
         _vbt.save(chunk_results, _chunk_pickle)
 
-        # Cleanup : del + flush + gc + malloc_trim (rend la RAM à l'OS)
+        # Pas de cleanup lourd — le Pool sera recyclé pour libérer la RAM
         del chunk_results, cv_fn, param_fn, param_grid, splitter, _data
-        _vbt.flush()
-        gc.collect()
-        try:
-            ctypes.CDLL("libc.so.6").malloc_trim(0)
-        except Exception:
-            pass
         shutil.rmtree(_split_chunk_dir, ignore_errors=True)
 
         return pair, chunk_idx, True, "OK"
     except Exception as _e:
-        try:
-            del _data
-        except Exception:
-            pass
-        _vbt.flush()
-        gc.collect()
-        try:
-            ctypes.CDLL("libc.so.6").malloc_trim(0)
-        except Exception:
-            pass
         return pair, chunk_idx, False, str(_e)
 
 
@@ -644,53 +627,78 @@ if __name__ == '__main__':
         with open(_log_path, 'a') as _f:
             _f.write(_line + '\n')
 
-    from tqdm import tqdm
-
     _bt_per_chunk = (n_combos // n_chunks) * 20
     _total_bt = n_combos * 20 * len(to_run)
 
-    _main_log(f"Démarrage : {len(tasks)} tasks, {n_parallel} workers, {_total_bt:,} bt total")
+    # Compter les chunks déjà en cache pour exclure du total
+    _skipped_bt = 0
+    for p, cidx, sg in tasks:
+        _cd = os.path.join(cache_dir, '.grid_chunks', p, f'chunk_{cidx}.pickle')
+        if os.path.exists(_cd):
+            _skipped_bt += _bt_per_chunk
+    _real_bt = _total_bt - _skipped_bt
 
-    pool = _mp.Pool(processes=n_parallel)
+    # Recycler le Pool tous les RECYCLE_EVERY chunks pour libérer la RAM
+    # Les workers calculent à fond sans cleanup, puis meurent → RAM libérée par l'OS
+    RECYCLE_EVERY = n_parallel * 3  # ~72 chunks puis recycle (~3 chunks par worker)
+
+    from tqdm import tqdm
+
+    _main_log(f"Démarrage : {len(tasks)} tasks, {n_parallel} workers, recycle/{RECYCLE_EVERY}, {_real_bt:,} bt à calculer ({_skipped_bt:,} skippés)")
+
+    pbar = tqdm(total=_real_bt, desc="Backtests", unit='bt', unit_scale=True, smoothing=0,
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}')
+
+    pool = None
 
     def _sigint_handler(sig, frame):
         print("\n\nCtrl+C reçu — arrêt...")
-        pool.terminate()
-        pool.join()
+        if pool is not None:
+            pool.terminate()
+            pool.join()
         sys.exit(1)
     signal.signal(signal.SIGINT, _sigint_handler)
 
-    pbar = tqdm(total=_total_bt, desc="Backtests", unit='bt', unit_scale=True,
-                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}')
-
     try:
-        for result in pool.imap_unordered(_process_chunk_wrapper, _task_args):
-            pair, cidx, success, msg = result
-            done_chunks += 1
+        for batch_start in range(0, len(_task_args), RECYCLE_EVERY):
+            batch = _task_args[batch_start:batch_start + RECYCLE_EVERY]
+
+            pool = _mp.Pool(processes=min(n_parallel, len(batch)))
+
+            for result in pool.imap_unordered(_process_chunk_wrapper, batch):
+                pair, cidx, success, msg = result
+                done_chunks += 1
+                ram_pct = psutil.virtual_memory().percent
+
+                if msg != "skip":
+                    pbar.update(_bt_per_chunk)
+                pbar.set_postfix_str(f"RAM {ram_pct:.0f}% | {pair} c{cidx+1}/{n_chunks} | {done_chunks}/{len(tasks)}")
+
+                status = "✓" if success else f"✗ {msg}"
+                _main_log(f"{status} {pair} chunk {cidx+1}/{n_chunks} [{done_chunks}/{len(tasks)}] RAM {ram_pct:.0f}%")
+
+                if not success:
+                    failed.append(f"{pair}/chunk{cidx}")
+
+            # Tuer le Pool → tous les workers meurent → RAM libérée par l'OS
+            pool.close()
+            pool.join()
+            del pool
+            pool = None
+
             ram_pct = psutil.virtual_memory().percent
-
-            pbar.update(_bt_per_chunk)
-            pbar.set_postfix_str(f"RAM {ram_pct:.0f}% | {pair} c{cidx+1}/{n_chunks} | {done_chunks}/{len(tasks)} chunks")
-
-            status = "✓" if success else f"✗ {msg}"
-            _main_log(f"{status} {pair} chunk {cidx+1}/{n_chunks} [{done_chunks}/{len(tasks)}] RAM {ram_pct:.0f}%")
-
-            if not success:
-                failed.append(f"{pair}/chunk{cidx}")
+            _main_log(f"♻ Pool recyclé [{done_chunks}/{len(tasks)}] RAM {ram_pct:.0f}%")
 
             if ram_pct > 90:
                 _main_log(f"🚨 RAM CRITIQUE {ram_pct:.0f}% — ARRÊT")
                 tg_send(f"🚨 Opti arrêtée — RAM {ram_pct:.0f}%")
-                pool.terminate()
                 break
-
-        pool.close()
-        pool.join()
 
     except KeyboardInterrupt:
         print("\nArrêt en cours...")
-        pool.terminate()
-        pool.join()
+        if pool is not None:
+            pool.terminate()
+            pool.join()
         sys.exit(1)
     finally:
         pbar.close()
