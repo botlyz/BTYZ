@@ -216,20 +216,10 @@ def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
 
     from vectorbtpro import vbt as _vbt
 
+    _pf_map = {'keltner': 'kc_wfsl', 'ram': 'ram', 'ram_vol': 'ram_vol', 'ram_rsi': 'ram_rsi'}
     _chunk_save_dir = os.path.join(cache_dir, '.grid_chunks', pair)
     os.makedirs(_chunk_save_dir, exist_ok=True)
     _chunk_pickle = os.path.join(_chunk_save_dir, f'chunk_{chunk_idx}.pickle')
-
-    # Fichier de progression cumulatif pour ce worker (lu par le thread monitor)
-    _progress_file = os.path.join(cache_dir, '.progress', f'{os.getpid()}.count')
-    os.makedirs(os.path.dirname(_progress_file), exist_ok=True)
-    # Lire le compteur existant (pour cumuler entre les chunks)
-    _prev_count = 0
-    try:
-        with open(_progress_file, 'r') as f:
-            _prev_count = int(f.read().strip() or '0')
-    except Exception:
-        pass
 
     if os.path.exists(_chunk_pickle):
         return pair, chunk_idx, True, "skip"
@@ -247,35 +237,13 @@ def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
         }
         objective_fn = _obj_map[strategy]
 
-        sub_n = 1
-        for v in sub_grid.values():
-            sub_n *= len(v)
-
         splitter = _vbt.Splitter.from_n_rolling(
             _data.index, n=10, length='optimize', split=0.7,
             optimize_anchor_set=1, set_labels=['train', 'test']
         )
 
-        # Wrapper l'objective pour compter chaque appel (= 1 backtest)
-        # functools.wraps préserve la signature pour que VBT reconnaisse 'data'
-        import functools
-        _bt_count = [_prev_count]
-        _orig_fn = objective_fn
-
-        @functools.wraps(_orig_fn)
-        def _counting_fn(*args, **kwargs):
-            result = _orig_fn(*args, **kwargs)
-            _bt_count[0] += 1
-            if _bt_count[0] % 10 == 0:
-                try:
-                    with open(_progress_file, 'w') as f:
-                        f.write(str(_bt_count[0]))
-                except Exception:
-                    pass
-            return result
-
         param_fn = _vbt.parameterized(
-            _counting_fn,
+            objective_fn,
             merge_func='concat',
             execute_kwargs=dict(show_progress=False),
         )
@@ -310,8 +278,6 @@ def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
             pass
         shutil.rmtree(_split_chunk_dir, ignore_errors=True)
 
-        # Ne pas supprimer le fichier de progression — il cumule entre les chunks
-
         return pair, chunk_idx, True, "OK"
     except Exception as _e:
         try:
@@ -322,10 +288,6 @@ def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
         gc.collect()
         try:
             ctypes.CDLL("libc.so.6").malloc_trim(0)
-        except Exception:
-            pass
-        try:
-            os.remove(_progress_file)
         except Exception:
             pass
         return pair, chunk_idx, False, str(_e)
@@ -639,7 +601,7 @@ if __name__ == '__main__':
         sys.exit(0)
 
     # Chunker la grille
-    grid_chunks = _chunk_grid(grid, max_combos=200)
+    grid_chunks = _chunk_grid(grid, max_combos=50)
     n_chunks = len(grid_chunks)
     n_combos = 1
     for v in grid.values():
@@ -687,16 +649,7 @@ if __name__ == '__main__':
     _bt_per_chunk = (n_combos // n_chunks) * 20
     _total_bt = n_combos * 20 * len(to_run)
 
-    import threading, glob as _glob
-
-    _main_log(f"Démarrage : {len(tasks)} tasks, {n_parallel} workers, {_total_bt:,} backtests total")
-
-    # Dossier de progression
-    _progress_dir = os.path.join(cache_dir, '.progress')
-    os.makedirs(_progress_dir, exist_ok=True)
-    # Nettoyer les anciens fichiers de progression
-    for f in _glob.glob(os.path.join(_progress_dir, '*.count')):
-        os.remove(f)
+    _main_log(f"Démarrage : {len(tasks)} tasks, {n_parallel} workers, {_total_bt:,} bt total")
 
     pool = _mp.Pool(processes=n_parallel)
 
@@ -710,44 +663,15 @@ if __name__ == '__main__':
     pbar = tqdm(total=_total_bt, desc="Backtests", unit='bt', unit_scale=True,
                 bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}')
 
-    # Thread monitor : lit les fichiers de progression des workers toutes les 0.5s
-    _stop_monitor = threading.Event()
-    _monitor_state = {'last_total': 0}
-
-    def _monitor_progress():
-        while not _stop_monitor.is_set():
-            try:
-                worker_files = _glob.glob(os.path.join(_progress_dir, '*.count'))
-                _total = 0
-                for wf in worker_files:
-                    try:
-                        with open(wf, 'r') as f:
-                            _total += int(f.read().strip() or '0')
-                    except Exception:
-                        pass
-                delta = _total - _monitor_state['last_total']
-                if delta > 0:
-                    pbar.update(delta)
-                    _monitor_state['last_total'] = _total
-                ram_pct = psutil.virtual_memory().percent
-                pbar.set_postfix_str(f"RAM {ram_pct:.0f}% | {done_chunks}/{len(tasks)} chunks")
-            except Exception:
-                pass
-            _stop_monitor.wait(0.5)
-
-    _monitor_thread = threading.Thread(target=_monitor_progress, daemon=True)
-    _monitor_thread.start()
-
     try:
         for result in pool.imap_unordered(_process_chunk_wrapper, _task_args):
             pair, cidx, success, msg = result
             done_chunks += 1
-
-            # Compter les skips dans la barre (pas comptés par les fichiers .count)
-            if msg == "skip":
-                pbar.update(_bt_per_chunk)
-
             ram_pct = psutil.virtual_memory().percent
+
+            pbar.update(_bt_per_chunk)
+            pbar.set_postfix_str(f"RAM {ram_pct:.0f}% | {pair} c{cidx+1}/{n_chunks} | {done_chunks}/{len(tasks)} chunks")
+
             status = "✓" if success else f"✗ {msg}"
             _main_log(f"{status} {pair} chunk {cidx+1}/{n_chunks} [{done_chunks}/{len(tasks)}] RAM {ram_pct:.0f}%")
 
@@ -769,8 +693,6 @@ if __name__ == '__main__':
         pool.join()
         sys.exit(1)
     finally:
-        _stop_monitor.set()
-        _monitor_thread.join(timeout=2)
         pbar.close()
 
     # Phase 2 : Assembler les chunks en pickles finaux (séquentiel, rapide)
