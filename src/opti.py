@@ -220,9 +220,16 @@ def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
     os.makedirs(_chunk_save_dir, exist_ok=True)
     _chunk_pickle = os.path.join(_chunk_save_dir, f'chunk_{chunk_idx}.pickle')
 
-    # Fichier de progression pour ce worker (lu par le thread monitor)
+    # Fichier de progression cumulatif pour ce worker (lu par le thread monitor)
     _progress_file = os.path.join(cache_dir, '.progress', f'{os.getpid()}.count')
     os.makedirs(os.path.dirname(_progress_file), exist_ok=True)
+    # Lire le compteur existant (pour cumuler entre les chunks)
+    _prev_count = 0
+    try:
+        with open(_progress_file, 'r') as f:
+            _prev_count = int(f.read().strip() or '0')
+    except Exception:
+        pass
 
     if os.path.exists(_chunk_pickle):
         return pair, chunk_idx, True, "skip"
@@ -252,7 +259,7 @@ def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
         # Wrapper l'objective pour compter chaque appel (= 1 backtest)
         # functools.wraps préserve la signature pour que VBT reconnaisse 'data'
         import functools
-        _bt_count = [0]
+        _bt_count = [_prev_count]
         _orig_fn = objective_fn
 
         @functools.wraps(_orig_fn)
@@ -303,11 +310,7 @@ def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
             pass
         shutil.rmtree(_split_chunk_dir, ignore_errors=True)
 
-        # Nettoyer le fichier de progression
-        try:
-            os.remove(_progress_file)
-        except Exception:
-            pass
+        # Ne pas supprimer le fichier de progression — il cumule entre les chunks
 
         return pair, chunk_idx, True, "OK"
     except Exception as _e:
@@ -709,24 +712,23 @@ if __name__ == '__main__':
 
     # Thread monitor : lit les fichiers de progression des workers toutes les 0.5s
     _stop_monitor = threading.Event()
-    _monitor_state = {'last_total': 0, 'completed_bt': 0}
+    _monitor_state = {'last_total': 0}
 
     def _monitor_progress():
         while not _stop_monitor.is_set():
             try:
                 worker_files = _glob.glob(os.path.join(_progress_dir, '*.count'))
-                _live_count = 0
+                _total = 0
                 for wf in worker_files:
                     try:
                         with open(wf, 'r') as f:
-                            _live_count += int(f.read().strip() or '0')
+                            _total += int(f.read().strip() or '0')
                     except Exception:
                         pass
-                _new_total = _monitor_state['completed_bt'] + _live_count
-                delta = _new_total - _monitor_state['last_total']
+                delta = _total - _monitor_state['last_total']
                 if delta > 0:
                     pbar.update(delta)
-                    _monitor_state['last_total'] = _new_total
+                    _monitor_state['last_total'] = _total
                 ram_pct = psutil.virtual_memory().percent
                 pbar.set_postfix_str(f"RAM {ram_pct:.0f}% | {done_chunks}/{len(tasks)} chunks")
             except Exception:
@@ -741,14 +743,9 @@ if __name__ == '__main__':
             pair, cidx, success, msg = result
             done_chunks += 1
 
-            # Ajouter les backtests de ce chunk au total complété
-            sub_n = 1
-            for _ta in _task_args:
-                if _ta[0] == pair and _ta[1] == cidx:
-                    for v in _ta[2].values():
-                        sub_n *= len(v)
-                    break
-            _monitor_state['completed_bt'] += sub_n * 20
+            # Compter les skips dans la barre (pas comptés par les fichiers .count)
+            if msg == "skip":
+                pbar.update(_bt_per_chunk)
 
             ram_pct = psutil.virtual_memory().percent
             status = "✓" if success else f"✗ {msg}"
