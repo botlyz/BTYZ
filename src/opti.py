@@ -210,26 +210,13 @@ def _chunk_grid(grid, max_combos=1500):
 
 
 def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
-    """Traite UN chunk d'UNE paire."""
-    import warnings, gc, shutil, time as _time
+    """Traite UN chunk d'UNE paire dans un worker Pool."""
+    import warnings, gc, shutil, ctypes
     warnings.filterwarnings('ignore')
 
     from vectorbtpro import vbt as _vbt
-    import psutil as _ps
-
-    _pid = os.getpid()
-    _proc = _ps.Process(_pid)
-    _t0 = _time.time()
-
-    def _log(msg):
-        _ram = _proc.memory_info().rss / 1024 / 1024
-        _sys_ram = _ps.virtual_memory().percent
-        _elapsed = _time.time() - _t0
-        import sys as _s
-        print(f"  [{pair}:c{chunk_idx}|PID {_pid}|{_ram:.0f}MB|sys {_sys_ram:.0f}%|{_elapsed:.0f}s] {msg}", file=_s.stderr, flush=True)
 
     _pf_map = {'keltner': 'kc_wfsl', 'ram': 'ram', 'ram_vol': 'ram_vol', 'ram_rsi': 'ram_rsi'}
-    prefix = _pf_map.get(strategy, 'ram')
     _chunk_save_dir = os.path.join(cache_dir, '.grid_chunks', pair)
     os.makedirs(_chunk_save_dir, exist_ok=True)
     _chunk_pickle = os.path.join(_chunk_save_dir, f'chunk_{chunk_idx}.pickle')
@@ -237,7 +224,6 @@ def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
     if os.path.exists(_chunk_pickle):
         return pair, chunk_idx, True, "skip"
 
-    _log("load data")
     _data = load_data(exchange, tf, pair)
     if _data is None:
         return pair, chunk_idx, False, "Pas de data"
@@ -251,11 +237,6 @@ def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
         }
         objective_fn = _obj_map[strategy]
 
-        sub_n = 1
-        for v in sub_grid.values():
-            sub_n *= len(v)
-        _log(f"start {sub_n} combos × 10 splits")
-
         splitter = _vbt.Splitter.from_n_rolling(
             _data.index, n=10, length='optimize', split=0.7,
             optimize_anchor_set=1, set_labels=['train', 'test']
@@ -264,7 +245,7 @@ def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
         param_fn = _vbt.parameterized(
             objective_fn,
             merge_func='concat',
-            execute_kwargs=dict(show_progress=False),
+            execute_kwargs=dict(show_progress=True),
         )
         _split_chunk_dir = os.path.join(cache_dir, '.split_chunks', pair, f'chunk_{chunk_idx}')
 
@@ -274,7 +255,7 @@ def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
             takeable_args=['data'],
             merge_func='concat',
             execute_kwargs=dict(
-                show_progress=False,
+                show_progress=True,
                 cache_chunks=True,
                 chunk_cache_dir=_split_chunk_dir,
                 release_chunk_cache=True,
@@ -285,25 +266,30 @@ def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
         param_grid = {k: _vbt.Param(v) for k, v in sub_grid.items()}
         chunk_results = cv_fn(_data, **param_grid)
 
-        _log("save pickle")
         _vbt.save(chunk_results, _chunk_pickle)
 
-        _log("cleanup")
+        # Cleanup : del + flush + gc + malloc_trim (rend la RAM à l'OS)
         del chunk_results, cv_fn, param_fn, param_grid, splitter, _data
         _vbt.flush()
         gc.collect()
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
         shutil.rmtree(_split_chunk_dir, ignore_errors=True)
 
-        _log("done")
         return pair, chunk_idx, True, "OK"
     except Exception as _e:
-        _log(f"ERROR: {_e}")
         try:
             del _data
         except Exception:
             pass
         _vbt.flush()
         gc.collect()
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
         return pair, chunk_idx, False, str(_e)
 
 
@@ -631,31 +617,22 @@ if __name__ == '__main__':
     print(f"Combos/chunk : ~{n_combos // n_chunks} | Total combos/paire : {n_combos}")
 
     import multiprocessing
+    import multiprocessing as _mp
+    import psutil
+    import signal
+
     n_cpus = multiprocessing.cpu_count()
-    _max_by_ram = n_cpus
-    n_parallel = min(n_cpus, len(tasks), _max_by_ram)
-    print(f"Parallélisme : {n_parallel} workers persistants (import VBT 1x + malloc_trim)\n")
+    n_parallel = min(n_cpus, len(tasks))
+    print(f"Parallélisme : {n_parallel} workers (Pool + malloc_trim)\n")
 
     t0 = time.time()
     done_chunks = 0
     failed = []
 
-    import signal
-    import multiprocessing as _mp
-    import psutil
-    import gc as _gc
-
     _task_args = [
         (p, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir)
         for p, chunk_idx, sub_grid in tasks
     ]
-
-    def _sigint_handler(sig, frame):
-        print("\n\nCtrl+C reçu — arrêt...")
-        subprocess.run(['pkill', '-9', '-f', 'opti_worker'], capture_output=True)
-        subprocess.run(['pkill', '-9', '-P', str(os.getpid())], capture_output=True)
-        sys.exit(1)
-    signal.signal(signal.SIGINT, _sigint_handler)
 
     # Log file
     _log_path = os.path.join(cache_dir, 'opti.log')
@@ -667,183 +644,45 @@ if __name__ == '__main__':
         with open(_log_path, 'a') as _f:
             _f.write(_line + '\n')
 
-    # Workers persistants : chaque worker importe VBT une seule fois,
-    # reçoit des chunks via stdin, libère la RAM avec malloc_trim entre chaque.
-    import json as _json
-    import threading
-    from queue import Queue, Empty
+    _main_log(f"Démarrage : {len(tasks)} tasks, {n_parallel} workers")
 
-    _worker_script = os.path.join(os.path.dirname(__file__), 'opti_worker.py')
-    _result_queue = Queue()
+    pool = _mp.Pool(processes=n_parallel)
 
-    class PersistentWorker:
-        """Worker subprocess persistant communiquant via stdin/stdout."""
-        def __init__(self, worker_id):
-            self.id = worker_id
-            self.proc = subprocess.Popen(
-                [sys.executable, _worker_script],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, text=True, bufsize=1,
-            )
-            # Attendre READY
-            line = self.proc.stdout.readline().strip()
-            if line != "READY":
-                raise RuntimeError(f"Worker {worker_id} failed to start: {line}")
-
-        def send_task(self, pair, cidx, sub_grid, strat, exch, tf, cdir):
-            """Envoie une tâche au worker."""
-            _clean = {}
-            for k, v in sub_grid.items():
-                _clean[k] = [int(x) if isinstance(x, (int, np.integer)) else float(x) for x in v]
-            task = _json.dumps({
-                'pair': pair, 'chunk_idx': cidx, 'sub_grid': _clean,
-                'strategy': strat, 'exchange': exch, 'tf': tf, 'cache_dir': cdir,
-            })
-            self.proc.stdin.write(task + '\n')
-            self.proc.stdin.flush()
-
-        def read_result(self, expected_pair, expected_cidx):
-            """Lit le résultat du worker (bloquant)."""
-            line = self.proc.stdout.readline().strip()
-            if line.startswith('RESULT:'):
-                parts = line[7:].split(':', 3)
-                return parts[0], int(parts[1]), parts[2] == 'True', parts[3]
-            return expected_pair, expected_cidx, False, f"bad response: {line}"
-
-        def kill(self):
-            try:
-                self.proc.stdin.write('EXIT\n')
-                self.proc.stdin.flush()
-                self.proc.wait(timeout=5)
-            except Exception:
-                self.proc.kill()
-
-    def _worker_loop(worker, task_queue):
-        """Thread qui alimente un worker persistant depuis la queue de tâches."""
-        while True:
-            try:
-                task = task_queue.get(timeout=1)
-            except Empty:
-                continue
-            if task is None:  # poison pill
-                break
-            pair, cidx, sub_grid, strat, exch, tf, cdir = task
-            try:
-                worker.send_task(pair, cidx, sub_grid, strat, exch, tf, cdir)
-                result = worker.read_result(pair, cidx)
-                _result_queue.put(result)
-            except Exception as e:
-                _result_queue.put((pair, cidx, False, str(e)))
-            task_queue.task_done()
-
-    from tqdm import tqdm
-
-    from tqdm import tqdm
-
-    _main_log(f"Démarrage : {len(tasks)} tasks, {n_parallel} workers persistants")
-
-    # Compteurs par paire
-    _pair_chunks_total = {}
-    _pair_chunks_done = {}
-    for p, cidx, _ in tasks:
-        _pair_chunks_total[p] = _pair_chunks_total.get(p, 0) + 1
-        _pair_chunks_done[p] = 0
-    _progress = {'pairs_done': 0}
-    _current_pairs = set()
-
-    # Barres de progression
-    _first_pair = to_run[0]
-    _bt_per_chunk = (n_combos // n_chunks) * 20  # combos × 10 splits × 2 (train/test)
-    _total_bt = n_combos * 20 * len(to_run)
-    pbar_total = tqdm(total=_total_bt, desc="Total", position=0, unit='bt', unit_scale=True,
-                      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} bt [{elapsed}<{remaining}, {rate_fmt}] RAM:{postfix}')
-    pbar_pair = tqdm(total=n_chunks, desc=f"{_first_pair} (0/{len(to_run)} paires)", position=1,
-                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} chunks [{elapsed}<{remaining}] {postfix}')
-
-    def _update_bars(_pair, _cidx, success, msg):
-        ram = psutil.virtual_memory()
-        ram_str = f" {ram.used/1024**3:.0f}/{ram.total/1024**3:.0f}G ({ram.percent:.0f}%)"
-
-        pbar_total.update(_bt_per_chunk)
-        pbar_total.set_postfix_str(ram_str)
-
-        if _pair in _pair_chunks_total:
-            _pair_chunks_done[_pair] = _pair_chunks_done.get(_pair, 0) + 1
-            _current_pairs.add(_pair)
-
-            _active = max(_current_pairs, key=lambda p: _pair_chunks_done.get(p, 0))
-            _done_p = _pair_chunks_done[_active]
-            _total_p = _pair_chunks_total[_active]
-
-            if _done_p >= _total_p:
-                _progress['pairs_done'] += 1
-                _current_pairs.discard(_active)
-
-            pbar_pair.reset(total=_total_p)
-            pbar_pair.n = _done_p
-            pbar_pair.set_description(f"{_active} ({_progress['pairs_done']}/{len(to_run)} paires)")
-            pbar_pair.set_postfix_str("✓" if success else f"✗ {msg}")
-            pbar_pair.refresh()
-
-        status = "✓" if success else f"✗ {msg}"
-        _main_log(f"{status} {_pair} chunk {_cidx+1}/{n_chunks} [{pbar_total.n}/{_total_bt}]")
-
-    # Lancer les workers persistants
-    print(f"Lancement de {n_parallel} workers persistants (import VBT)...", flush=True)
-    workers = []
-    for i in range(n_parallel):
-        try:
-            w = PersistentWorker(i)
-            workers.append(w)
-        except Exception as e:
-            print(f"  Worker {i} failed: {e}")
-    print(f"{len(workers)} workers prêts.\n", flush=True)
-
-    # Queue de tâches
-    task_queue = Queue()
-    for ta in _task_args:
-        task_queue.put(ta)
-
-    # Lancer les threads qui alimentent les workers
-    threads = []
-    for w in workers:
-        t = threading.Thread(target=_worker_loop, args=(w, task_queue), daemon=True)
-        t.start()
-        threads.append(t)
+    def _sigint_handler(sig, frame):
+        print("\n\nCtrl+C reçu — arrêt...")
+        pool.terminate()
+        pool.join()
+        sys.exit(1)
+    signal.signal(signal.SIGINT, _sigint_handler)
 
     try:
-        _expected = len(tasks)
-        while done_chunks < _expected:
-            try:
-                result = _result_queue.get(timeout=5)
-                _pair, _cidx, success, msg = result
-                done_chunks += 1
-                _update_bars(_pair, _cidx, success, msg)
-                if not success:
-                    failed.append(f"{_pair}/chunk{_cidx}")
+        for result in pool.imap_unordered(_process_chunk_wrapper, _task_args):
+            pair, cidx, success, msg = result
+            done_chunks += 1
+            elapsed = time.time() - t0
+            eta = elapsed / done_chunks * (len(tasks) - done_chunks) if done_chunks > 0 else 0
+            ram_pct = psutil.virtual_memory().percent
 
-                ram_pct = psutil.virtual_memory().percent
-                if ram_pct > 90:
-                    _main_log(f"🚨 RAM CRITIQUE {ram_pct:.0f}% — ARRÊT")
-                    tg_send(f"🚨 Opti arrêtée — RAM {ram_pct:.0f}%")
-                    break
-            except Empty:
-                # Vérifier que les workers sont encore vivants
-                alive = sum(1 for w in workers if w.proc.poll() is None)
-                if alive == 0 and not task_queue.empty():
-                    _main_log("Tous les workers sont morts!")
-                    break
+            if success:
+                _main_log(f"✓ {pair} chunk {cidx+1}/{n_chunks} [{done_chunks}/{len(tasks)}] ETA {int(eta//60)}m{int(eta%60):02d}s" + (f" ({msg})" if msg == "skip" else ""))
+            else:
+                _main_log(f"✗ {pair} chunk {cidx+1}/{n_chunks} : {msg}")
+                failed.append(f"{pair}/chunk{cidx}")
+
+            if ram_pct > 90:
+                _main_log(f"🚨 RAM CRITIQUE {ram_pct:.0f}% — ARRÊT")
+                tg_send(f"🚨 Opti arrêtée — RAM {ram_pct:.0f}%")
+                pool.terminate()
+                break
+
+        pool.close()
+        pool.join()
 
     except KeyboardInterrupt:
         print("\nArrêt en cours...")
-    finally:
-        # Poison pills pour arrêter les threads
-        for _ in workers:
-            task_queue.put(None)
-        for w in workers:
-            w.kill()
-        pbar_total.close()
-        pbar_pair.close()
+        pool.terminate()
+        pool.join()
+        sys.exit(1)
 
     # Phase 2 : Assembler les chunks en pickles finaux (séquentiel, rapide)
     print(f"\nAssemblage des chunks...")
