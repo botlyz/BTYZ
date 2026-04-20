@@ -1,6 +1,6 @@
 #constantes globales du projet, importées un peu partout
 
-FEES = 0.0       # frais de trading : 0 bps (Lighter maker/taker = 0%)
+FEES = 0.001     # frais de trading : 10 bps (réaliste pour comparer cross-exchange)
 SLIPPAGE = 0.0002 # spread bid-ask estimé : 0.02% par trade (paires liquides Lighter)
 INIT_CASH = 10000 #capital de depart pour les bt
 MIN_TRADES = 30 #en dessous de 30 trades c'est pas fiable statistiquement

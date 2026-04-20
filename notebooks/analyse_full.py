@@ -28,6 +28,7 @@ def _imports():
     PARAMS_BY_STRATEGY = {
         'keltner': ['ma_window', 'atr_window', 'atr_mult', 'sl_stop'],
         'ram':     ['ma_window', 'env_pct', 'sl_pct'],
+        'ram_rsi': ['ma_window', 'env_pct', 'sl_pct', 'rsi_filter'],
     }
 
     _PARQUET_DIR = '.parquet_cache'
@@ -63,10 +64,14 @@ def _imports():
         """
         kc_wfsl_BTC_5m_lighter.pickle  → ('keltner', 'BTC',  '5m', 'lighter')
         ram_HYPE_5m_lighter.pickle      → ('ram',     'HYPE', '5m', 'lighter')
+        ram_rsi_HYPE_5m_lighter.pickle  → ('ram_rsi', 'HYPE', '5m', 'lighter')
         """
         name  = os.path.basename(fname).replace('.pickle', '')
         parts = name.split('_')
-        if parts[0] == 'ram':
+        if parts[0] == 'ram' and len(parts) > 1 and parts[1] == 'rsi':
+            # ram_rsi_{PAIR}_{tf}_{exchange}
+            return 'ram_rsi', parts[2], parts[3], parts[4] if len(parts) > 4 else 'unknown'
+        elif parts[0] == 'ram':
             # ram_{PAIR}_{tf}_{exchange}
             return 'ram', parts[1], parts[2], parts[3] if len(parts) > 3 else 'unknown'
         else:
@@ -758,7 +763,7 @@ def _section7_main_controls(best_params_table, detected_strategy, mo, pairs):
     bt_fees    = mo.ui.number(value=0.001, start=0.0, stop=0.01, step=0.0001, label='Fees par trade')
     run_btn    = mo.ui.button(label='▶ Lancer le backtest', on_click=lambda v: (v or 0) + 1, value=0)
 
-    _strat_label = 'RAM DCA' if detected_strategy == 'ram' else 'Keltner Channel'
+    _strat_label = 'RAM DCA + RSI' if detected_strategy == 'ram_rsi' else ('RAM DCA' if detected_strategy == 'ram' else 'Keltner Channel')
 
     mo.output.replace(mo.vstack([
         mo.md("## 8. Backtest final interactif"),
@@ -818,20 +823,24 @@ def _section7_param_controls(
     bt_ma   = mo.ui.number(value=int(_def.get('ma_window', 20)), start=5, stop=500, step=1, label='ma_window')
     bt_env  = mo.ui.number(value=float(_def.get('env_pct', 0.03)), start=0.005, stop=0.30, step=0.005, label='env_pct (RAM)')
     bt_sl   = mo.ui.number(value=float(_def.get('sl_pct', _def.get('sl_stop', 0.05))), start=0.005, stop=0.30, step=0.005, label='sl_pct / sl_stop')
+    _rsi_names = {0: '0 (off)', 1: '1 (RSI60 40-60)', 2: '2 (RSI80 42-58)', 3: '3 (RSI120 42-58)'}
+    _rsi_default = _rsi_names.get(int(_def.get('rsi_filter', 0)), '0 (off)')
+    bt_rsi  = mo.ui.dropdown(options={'0 (off)': 0, '1 (RSI60 40-60)': 1, '2 (RSI80 42-58)': 2, '3 (RSI120 42-58)': 3}, value=_rsi_default, label='rsi_filter (RAM+RSI)')
     bt_atrw = mo.ui.number(value=int(_def.get('atr_window', 10)), start=5, stop=500, step=1, label='atr_window (KC)')
     bt_atrm = mo.ui.number(value=float(_def.get('atr_mult', 2.0)), start=0.5, stop=20.0, step=0.5, label='atr_mult (KC)')
 
     mo.output.replace(mo.vstack([
-        mo.hstack([bt_ma, bt_env, bt_sl, bt_atrw, bt_atrm], justify="start", gap=2),
-        mo.callout(mo.md("**env_pct** et **sl_pct** sont pour RAM · **atr_window / atr_mult** pour Keltner · clique une ligne dans §6 pour auto-remplir"), kind="info"),
+        mo.hstack([bt_ma, bt_env, bt_sl, bt_rsi, bt_atrw, bt_atrm], justify="start", gap=2),
+        mo.callout(mo.md("**env_pct / sl_pct** pour RAM · **rsi_filter** pour RAM+RSI · **atr_window / atr_mult** pour Keltner · clique une ligne dans §6 pour auto-remplir"), kind="info"),
     ]))
-    return bt_atrm, bt_atrw, bt_env, bt_ma, bt_sl
+    return bt_atrm, bt_atrw, bt_env, bt_ma, bt_rsi, bt_sl
 
 
 @app.cell
 def _section7_backtest(
     bt_atrm,
     bt_atrw,
+    bt_rsi,
     bt_capital,
     bt_env,
     bt_fees,
@@ -895,37 +904,69 @@ def _section7_backtest(
         _fees_override = float(bt_fees.value)
         _fees_bps = _fees_override * 10000
 
-        if _strategy == 'ram':
-            from src.strategies.ram_dca import run_backtest as _rb, ram_dca_nb as _ram_dca_nb
+        if _strategy in ('ram', 'ram_rsi'):
             import numpy as _np
             from config import SLIPPAGE as _SLIPPAGE7, INIT_CASH as _INIT_CASH7
 
-            # Recalcul du portfolio avec les fees du slider
-            _src = _data['close']
-            _ma_s = vbt.MA.run(_src, window=int(bt_ma.value)).ma
-            _env_val = float(bt_env.value)
-            _n_bars = len(_data)
-            _upper_envs = _np.zeros((1, _n_bars))
-            _lower_envs = _np.zeros((1, _n_bars))
-            _upper_envs[0] = (_ma_s * (1.0 + _env_val)).values
-            _lower_envs[0] = (_ma_s * (1.0 - _env_val)).values
+            if _strategy == 'ram_rsi':
+                from src.strategies.ram_dca_rsi import run_backtest as _rb_rsi, ram_dca_rsi_nb as _rsi_nb, compute_rsi_filter as _rsi_filter_fn
+                from config import SLIPPAGE as _SLIPPAGE_RSI
 
-            _ts, _ep = _ram_dca_nb(
-                _data['high'].values, _data['low'].values, _data['close'].values,
-                _ma_s.values, _upper_envs, _lower_envs,
-                _np.array([1.0]), float(bt_sl.value),
-            )
+                _rsi_val = int(bt_rsi.value)
+                _src = _data['close']
+                _ma_s = vbt.MA.run(_src, window=int(bt_ma.value)).ma
+                _env_val = float(bt_env.value)
+                _n_bars = len(_data)
+                _upper_envs = _np.zeros((1, _n_bars))
+                _lower_envs = _np.zeros((1, _n_bars))
+                _upper_envs[0] = (_ma_s * (1.0 + _env_val)).values
+                _lower_envs[0] = (_ma_s * (1.0 - _env_val)).values
 
-            _pf = vbt.Portfolio.from_orders(
-                close=_data['close'],
-                size=pd.Series(_ts, index=_data.index),
-                price=pd.Series(_ep, index=_data.index),
-                size_type='TargetPercent',
-                init_cash=_INIT_CASH7,
-                fees=_fees_override,
-                slippage=_SLIPPAGE7,
-            )
-            _band_label = f'RAM DCA · ma={bt_ma.value} · env={_env_val*100:.1f}% · sl={float(bt_sl.value)*100:.1f}% · fees={_fees_bps:.0f}bps'
+                _can_trade = _rsi_filter_fn(_data['close'].values, _rsi_val)
+                _ts, _ep = _rsi_nb(
+                    _data['high'].values, _data['low'].values, _data['close'].values,
+                    _ma_s.values, _upper_envs, _lower_envs,
+                    _np.array([1.0]), float(bt_sl.value), _can_trade,
+                )
+
+                _pf = vbt.Portfolio.from_orders(
+                    close=_data['close'],
+                    size=pd.Series(_ts, index=_data.index),
+                    price=pd.Series(_ep, index=_data.index),
+                    size_type='TargetPercent',
+                    init_cash=_INIT_CASH7,
+                    fees=_fees_override,
+                    slippage=_SLIPPAGE_RSI,
+                )
+                _band_label = f'RAM DCA+RSI · ma={bt_ma.value} · env={_env_val*100:.1f}% · sl={float(bt_sl.value)*100:.1f}% · rsi={_rsi_val} · fees={_fees_bps:.0f}bps'
+            else:
+                from src.strategies.ram_dca import ram_dca_nb as _ram_dca_nb
+
+                _src = _data['close']
+                _ma_s = vbt.MA.run(_src, window=int(bt_ma.value)).ma
+                _env_val = float(bt_env.value)
+                _n_bars = len(_data)
+                _upper_envs = _np.zeros((1, _n_bars))
+                _lower_envs = _np.zeros((1, _n_bars))
+                _upper_envs[0] = (_ma_s * (1.0 + _env_val)).values
+                _lower_envs[0] = (_ma_s * (1.0 - _env_val)).values
+
+                _ts, _ep = _ram_dca_nb(
+                    _data['high'].values, _data['low'].values, _data['close'].values,
+                    _ma_s.values, _upper_envs, _lower_envs,
+                    _np.array([1.0]), float(bt_sl.value),
+                )
+
+                _pf = vbt.Portfolio.from_orders(
+                    close=_data['close'],
+                    size=pd.Series(_ts, index=_data.index),
+                    price=pd.Series(_ep, index=_data.index),
+                    size_type='TargetPercent',
+                    init_cash=_INIT_CASH7,
+                    fees=_fees_override,
+                    slippage=_SLIPPAGE7,
+                )
+                _band_label = f'RAM DCA · ma={bt_ma.value} · env={_env_val*100:.1f}% · sl={float(bt_sl.value)*100:.1f}% · fees={_fees_bps:.0f}bps'
         else:
             from src.strategies.keltner import run_backtest as _rb
             _pf = _rb(_data, int(bt_ma.value), int(bt_atrw.value), float(bt_atrm.value), float(bt_sl.value), size=1)

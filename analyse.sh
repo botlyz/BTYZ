@@ -5,7 +5,7 @@ PORT=2718
 echo "Nettoyage des instances précédentes..."
 pkill -f "cloudflared tunnel" 2>/dev/null
 pkill -f "marimo edit" 2>/dev/null
-pkill -f "opti.py" 2>/dev/null
+# pkill -f "opti.py" 2>/dev/null  # désactivé pour ne pas tuer l'opti en cours
 sleep 1
 
 # ── Menu ────────────────────────────────────────────────────────────────────
