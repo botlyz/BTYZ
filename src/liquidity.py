@@ -2,20 +2,21 @@
 Classifie les paires Lighter en 4 niveaux de liquidité :
   tres_liquide / liquide / moyen / poubelle
 
-Méthode :
-  1. Récupère strategy_index via l'API Lighter
-  2. Lit les CSV 1m (si dispo) → calcule flat_trading_% et gap_p99_%
-  3. Applique des seuils par classe d'actif (crypto, commodité, forex, action)
-  4. Regroupe par niveau et sauvegarde en JSON
+Méthode (basée sur snapshot orderbook live, pas CSV) :
+  1. Récupère la liste des marchés via /orderBookDetails (vol, trades, status)
+  2. Pour chaque marché actif, snapshot du carnet via /orderBookOrders
+  3. Calcule deux métriques :
+     - slip_bps   : coût d'exécution d'un trade $TARGET_NOTIONAL (worst side)
+     - max_gap_bps: plus gros écart entre deux ordres consécutifs du top of book
+  4. Gate d'activité pour les crypto (trades/j) — filtre MM statique sans flow
+  5. Classification + sauvegarde JSON
 
 Usage :
   python src/liquidity.py
-  python src/liquidity.py --data data/raw/lighter/1m --out liquidity.json
+  python src/liquidity.py --out liquidity.json --target 10000
 """
 
-import os, sys, json, argparse, glob
-import numpy as np
-import pandas as pd
+import json, argparse, time
 import urllib.request
 
 LIGHTER_API = 'https://mainnet.zklighter.elliot.ai/api/v1'
@@ -26,168 +27,198 @@ HEADERS = {
     'Accept':     'application/json',
 }
 
-# ── Seuils par classe d'actif ─────────────────────────────────────────────────
-# (flat_trading_%, gap_p99_%) → niveau
-# Format : {strat_group: [(flat_max, gap_max, niveau), ...]}  du + strict au + lâche
-THRESHOLDS = {
-    # crypto : deux règles pour "liquide"
-    #   1) flat < 4%  ET gap < 0.10%  (cas standard)
-    #   2) flat < 8%  ET gap < 0.001% (gap quasi nul = MM parfaitement continu, ex XPL)
-    'crypto':    [(1.0,  0.005, 'tres_liquide'),
-                  (4.0,  0.10,  'liquide'),
-                  (8.0,  0.001, 'liquide'),
-                  (8.0,  0.20,  'moyen')],
-    'commodity': [(20.0, 0.03,  'tres_liquide'),
-                  (55.0, 0.30,  'liquide'),
-                  (70.0, 0.50,  'moyen')],
-    # forex sur Lighter : flat > 28% pour toutes les paires → jamais liquide
-    # seuil moyen abaissé à 25% pour que GBPUSD+ → poubelle
-    'forex':     [(25.0, 0.05,  'moyen')],
-    'stock_us':  [(30.0, 0.05,  'tres_liquide'),
-                  (40.0, 0.15,  'liquide'),
-                  (55.0, 0.30,  'moyen')],
-    'stock_kr':  [(40.0, 0.20,  'tres_liquide'),
-                  (50.0, 0.40,  'liquide'),
-                  (65.0, 0.60,  'moyen')],
-}
+STRAT_CRYPTO = {2, 7}  # indexes crypto (MM dédié ou générique)
 
-STRAT_TO_GROUP = {
-    0: None,         # inactif
-    2: 'crypto',
-    3: 'commodity',
-    4: 'forex',
-    5: 'stock_us',
-    6: 'stock_kr',
-    7: 'crypto',     # crypto sans MM dédié — mêmes seuils
-}
+# ── Paramètres de classification ──────────────────────────────────────────────
+TARGET_NOTIONAL = 10_000        # $ — taille de trade cible pour slip
+ORDERBOOK_LIMIT = 250           # profondeur snapshot par côté
+
+# Gate d'activité crypto : MM statique sans trades réels = poubelle
+CRYPTO_MIN_TRADES = 400
+CRYPTO_SLIP_WHEN_IDLE = 5       # si trades < min ET slip > X → poubelle
+
+# Seuils durs (au-delà : poubelle quoi qu'il arrive)
+MAX_BOOK_GAP_BPS = 40
+MAX_SLIP_BPS     = 80
+
+# Étages (book + slip conjoints)
+TL_SLIP, TL_GAP  = 3, 3
+LIQ_SLIP, LIQ_GAP = 20, 20
+
+
+def get_json(url, retries=3):
+    for i in range(retries):
+        try:
+            req = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return json.load(r)
+        except Exception:
+            if i == retries - 1: raise
+            time.sleep(1.5)
 
 
 def fetch_markets():
-    """Retourne {symbol: {market_id, strategy_index, status}} depuis l'API."""
-    url = f'{LIGHTER_API}/orderBookDetails'
-    req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=15) as r:
-        data = json.load(r)
+    """Retourne {symbol: {market_id, strategy_index, status, vol, trades}}."""
+    details = get_json(f'{LIGHTER_API}/orderBookDetails')
+    books   = get_json(f'{LIGHTER_API}/orderBooks')
+    sym_to_id = {b['symbol']: b['market_id'] for b in books['order_books']}
     out = {}
-    for b in data['order_book_details']:
+    for b in details['order_book_details']:
         sym = b['symbol']
         out[sym] = {
-            'market_id':      b['market_id'],
+            'market_id':      sym_to_id.get(sym, b.get('market_id')),
             'strategy_index': b.get('strategy_index', -1),
             'status':         b.get('status', 'unknown'),
+            'daily_vol_usd':  float(b.get('daily_quote_token_volume') or 0),
+            'daily_trades':   float(b.get('daily_trades_count') or 0),
         }
     return out
 
 
-def compute_metrics(csv_path):
+def fetch_book(market_id):
+    """Snapshot orderbook. Retourne (bids, asks, mid) ou None."""
+    d = get_json(f'{LIGHTER_API}/orderBookOrders?market_id={market_id}&limit={ORDERBOOK_LIMIT}')
+    bids = sorted([(float(o['price']), float(o['remaining_base_amount']))
+                   for o in d.get('bids', [])], reverse=True)
+    asks = sorted([(float(o['price']), float(o['remaining_base_amount']))
+                   for o in d.get('asks', [])])
+    if not bids or not asks:
+        return None
+    mid = (bids[0][0] + asks[0][0]) / 2
+    return bids, asks, mid
+
+
+def analyse_book(bids, asks, mid, target=TARGET_NOTIONAL):
     """
-    Calcule flat_trading_% et gap_p99_% depuis un CSV 1m.
-    flat_trading_% : % de bougies plates (high==low) pendant les heures actives.
-    gap_p99_%      : 99e centile des écarts |open[t+1] - close[t]| / close[t].
+    Retourne dict :
+      - slip_bps    : max(ask_slip, bid_slip) pour exécuter target $ (None si depth insuffisante)
+      - max_gap_bps : plus gros écart (en bps du mid) entre ordres consécutifs près du top
     """
-    df = pd.read_csv(csv_path)
-    if len(df) < 200:
-        return None, None
+    def side(orders):
+        cum, max_gap, prev = 0.0, 0.0, mid
+        hit = None
+        for px, sz in orders:
+            g = abs(px - prev) / mid * 10000
+            if g > max_gap: max_gap = g
+            cum += px * sz
+            prev = px
+            if cum >= target and hit is None:
+                hit = abs(px - mid) / mid * 10000
+                break
+        return max_gap, hit
 
-    df = df.sort_values('date')
-    df['ts']   = pd.to_datetime(df['date'], unit='ms', utc=True)
-    df         = df.set_index('ts')
-    df['flat'] = (df['high'] == df['low']).astype(int)
-
-    # Heures actives : heures de la semaine avec >20 % de bougies non-plates
-    df['dow_hour'] = df.index.dayofweek * 24 + df.index.hour
-    activity       = df.groupby('dow_hour')['flat'].apply(lambda s: 1 - s.mean())
-    trading_hours  = activity[activity > 0.20].index
-    in_trading     = df['dow_hour'].isin(trading_hours)
-
-    if in_trading.sum() < 100:
-        return None, None
-
-    flat_pct = float(df.loc[in_trading, 'flat'].mean() * 100)
-
-    price_gap = ((df['open'].shift(-1) - df['close']) / df['close']).abs() * 100
-    gap_p99   = float(price_gap[in_trading].quantile(0.99))
-
-    return round(flat_pct, 3), round(gap_p99, 4)
+    a_gap, a_slip = side(asks)
+    b_gap, b_slip = side(bids)
+    slip = max(a_slip, b_slip) if (a_slip is not None and b_slip is not None) else None
+    return {'slip_bps': slip, 'max_gap_bps': max(a_gap, b_gap)}
 
 
-def classify(group, flat_pct, gap_p99):
-    """Retourne 'tres_liquide', 'liquide', 'moyen' ou 'poubelle'."""
-    if group is None:
+def classify(slip_bps, max_gap_bps, is_crypto, trades):
+    if slip_bps is None:
         return 'poubelle'
-    for flat_max, gap_max, level in THRESHOLDS[group]:
-        if flat_pct <= flat_max and gap_p99 <= gap_max:
-            return level
-    return 'poubelle'
+    # Gate activité crypto : MM statique = poubelle
+    if is_crypto and trades < CRYPTO_MIN_TRADES and slip_bps > CRYPTO_SLIP_WHEN_IDLE:
+        return 'poubelle'
+    # Book trop dégradé
+    if max_gap_bps > MAX_BOOK_GAP_BPS or slip_bps > MAX_SLIP_BPS:
+        return 'poubelle'
+    # Étages
+    if slip_bps <= TL_SLIP and max_gap_bps <= TL_GAP:
+        return 'tres_liquide'
+    if slip_bps <= LIQ_SLIP and max_gap_bps <= LIQ_GAP:
+        return 'liquide'
+    return 'moyen'
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data', default='data/raw/lighter/1m', help='Dossier CSV 1m')
-    parser.add_argument('--out',  default='liquidity.json',       help='Fichier JSON de sortie')
+    parser.add_argument('--out',    default='liquidity.json')
+    parser.add_argument('--target', type=float, default=TARGET_NOTIONAL,
+                        help='Taille de trade cible en $ (défaut 10000)')
+    parser.add_argument('--sleep',  type=float, default=0.25,
+                        help='Délai entre requêtes API (sec)')
     args = parser.parse_args()
 
     print('Récupération des marchés Lighter...')
     markets = fetch_markets()
-    print(f'  {len(markets)} marchés trouvés')
+    active = [(s, i) for s, i in markets.items() if i['status'] != 'inactive']
+    print(f'  {len(markets)} marchés totaux, {len(active)} actifs')
 
-    csv_files = {
-        os.path.basename(f).replace('.csv', ''): f
-        for f in glob.glob(os.path.join(args.data, '*.csv'))
-    }
-    print(f'  {len(csv_files)} CSV 1m disponibles\n')
-
-    result   = {'tres_liquide': [], 'liquide': [], 'moyen': [], 'poubelle': []}
-    details  = {}
+    result  = {'tres_liquide': [], 'liquide': [], 'moyen': [], 'poubelle': []}
+    details = {}
 
     for sym, info in sorted(markets.items()):
-        strat  = info['strategy_index']
-        status = info['status']
-        group  = STRAT_TO_GROUP.get(strat)
+        status   = info['status']
+        strat    = info['strategy_index']
+        mid_id   = info['market_id']
+        vol      = info['daily_vol_usd']
+        trades   = info['daily_trades']
+        is_crypto = strat in STRAT_CRYPTO
 
-        # Inactif → poubelle directement
-        if status == 'inactive' or group is None:
+        if status == 'inactive' or mid_id is None:
             result['poubelle'].append(sym)
             details[sym] = {'niveau': 'poubelle', 'raison': 'inactif'}
             continue
 
-        # Calcul métriques si CSV dispo
-        if sym in csv_files:
-            flat_pct, gap_p99 = compute_metrics(csv_files[sym])
+        try:
+            book = fetch_book(mid_id)
+        except Exception as e:
+            book = None
+            err = str(e)[:60]
         else:
-            flat_pct, gap_p99 = None, None
+            err = None
 
-        if flat_pct is None:
-            # Pas de données : on ne peut pas classer → moyen par défaut
-            niveau = 'moyen'
-            raison = 'pas de données 1m'
-        else:
-            niveau = classify(group, flat_pct, gap_p99)
-            raison = f'flat={flat_pct}% gap_p99={gap_p99}%'
+        if book is None:
+            niveau = 'poubelle'
+            raison = f'book vide ({err})' if err else 'book vide'
+            result[niveau].append(sym)
+            details[sym] = {'niveau': niveau, 'raison': raison}
+            print(f'  ✗  {sym:15} {raison}')
+            time.sleep(args.sleep)
+            continue
+
+        bids, asks, mid = book
+        m = analyse_book(bids, asks, mid, target=args.target)
+        slip, gap = m['slip_bps'], m['max_gap_bps']
+        niveau = classify(slip, gap, is_crypto, trades)
+
+        slip_s = f'{slip:.1f}' if slip is not None else 'MISS'
+        raison = f'slip={slip_s}bps gap={gap:.1f}bps trades/j={int(trades)}'
 
         result[niveau].append(sym)
         details[sym] = {
-            'niveau':   niveau,
-            'group':    group,
-            'flat_%':   flat_pct,
-            'gap_p99%': gap_p99,
-            'raison':   raison,
+            'niveau':      niveau,
+            'strat':       strat,
+            'is_crypto':   is_crypto,
+            'slip_bps':    round(slip, 2) if slip is not None else None,
+            'max_gap_bps': round(gap, 2),
+            'vol_usd':     int(vol),
+            'trades/j':    int(trades),
+            'raison':      raison,
         }
 
-        icon = {'tres_liquide': '★★', 'liquide': '★ ', 'moyen': '~ ', 'poubelle': '✗ '}[niveau]
+        icon = {'tres_liquide': '★★', 'liquide': '★ ',
+                'moyen': '~ ', 'poubelle': '✗ '}[niveau]
         print(f'  {icon} {sym:15} {raison}')
+        time.sleep(args.sleep)
 
-    # Tri alphabétique dans chaque catégorie
     for k in result:
         result[k].sort()
 
-    # JSON de sortie
     output = {
         'tres_liquide': result['tres_liquide'],
         'liquide':      result['liquide'],
         'moyen':        result['moyen'],
         'poubelle':     result['poubelle'],
         'details':      details,
+        'params': {
+            'target_notional': args.target,
+            'max_book_gap_bps': MAX_BOOK_GAP_BPS,
+            'max_slip_bps': MAX_SLIP_BPS,
+            'tl_slip_bps': TL_SLIP, 'tl_gap_bps': TL_GAP,
+            'liq_slip_bps': LIQ_SLIP, 'liq_gap_bps': LIQ_GAP,
+            'crypto_min_trades': CRYPTO_MIN_TRADES,
+        },
     }
 
     with open(args.out, 'w') as f:
@@ -198,6 +229,8 @@ def main():
     print(f'  ★  Liquide      : {len(result["liquide"])} paires')
     print(f'  ~  Moyen        : {len(result["moyen"])} paires')
     print(f'  ✗  Poubelle     : {len(result["poubelle"])} paires')
+    tradables = len(result['tres_liquide']) + len(result['liquide']) + len(result['moyen'])
+    print(f'  Total tradables: {tradables}')
     print(f'\nJSON sauvegardé → {args.out}')
 
 

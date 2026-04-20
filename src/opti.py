@@ -52,10 +52,16 @@ GRIDS = {
         'vol_window': [0, 7, 30, 90],
     },
     'ram_rsi': {
-        'ma_window':   list(range(20, 220, 20)),
-        'env_pct':     [round(x, 4) for x in np.arange(0.015, 0.085, 0.005)] + [round(x, 4) for x in np.arange(0.09, 0.125, 0.01)],
-        'sl_pct':      [round(x, 4) for x in np.arange(0.02, 0.085, 0.005)] + [round(x, 4) for x in np.arange(0.09, 0.125, 0.01)],
+        'ma_window':   [1, 10, 20] + list(range(40, 141, 20)),
+        'env_pct':     [round(x, 4) for x in np.arange(0.01, 0.121, 0.01)],
+        'sl_pct':      [round(x, 4) for x in np.arange(0.05, 0.121, 0.01)],
         'rsi_filter':  [0, 1, 2, 3],
+    },
+    'atr_env': {
+        'ma_window':  list(range(20, 220, 20)),
+        'atr_window': [14, 30, 60],
+        'atr_mult':   [round(x, 1) for x in np.arange(2.0, 21.0, 1.0)],
+        'sl_mult':    [round(x, 1) for x in np.arange(3.0, 12.0, 1.0)],
     },
 }
 
@@ -107,6 +113,17 @@ def ram_rsi_objective(data, ma_window, env_pct, sl_pct, rsi_filter):
         return None
 
 
+def atr_env_objective(data, ma_window, atr_window, atr_mult, sl_mult):
+    try:
+        import warnings
+        warnings.filterwarnings('ignore')
+        from src.strategies.atr_envelope import run_backtest
+        pf = run_backtest(data, int(ma_window), int(atr_window), float(atr_mult), float(sl_mult))
+        return pf.stats(silence_warnings=True)
+    except Exception:
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -118,7 +135,7 @@ def grid_dirname(strategy, grid):
     """
     from config import FEES, SLIPPAGE
 
-    _prefix_map = {'keltner': 'kc', 'ram': 'ram', 'ram_vol': 'ram_vol', 'ram_rsi': 'ram_rsi'}
+    _prefix_map = {'keltner': 'kc', 'ram': 'ram', 'ram_vol': 'ram_vol', 'ram_rsi': 'ram_rsi', 'atr_env': 'atr_env'}
     prefix = _prefix_map.get(strategy, 'ram')
 
     # Résumé compact des params
@@ -233,6 +250,7 @@ def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
             'ram': ram_objective,
             'ram_vol': ram_vol_objective,
             'ram_rsi': ram_rsi_objective,
+            'atr_env': atr_env_objective,
         }
         objective_fn = _obj_map[strategy]
 
@@ -284,7 +302,7 @@ def _process_chunk_wrapper(args):
 def assemble_pair(pair, strategy, cache_dir):
     """Assemble les chunks d'une paire en un seul pickle final."""
     import gc
-    _pf_map = {'keltner': 'kc_wfsl', 'ram': 'ram', 'ram_vol': 'ram_vol', 'ram_rsi': 'ram_rsi'}
+    _pf_map = {'keltner': 'kc_wfsl', 'ram': 'ram', 'ram_vol': 'ram_vol', 'ram_rsi': 'ram_rsi', 'atr_env': 'atr_env'}
     prefix = _pf_map.get(strategy, 'ram')
     _chunk_save_dir = os.path.join(cache_dir, '.grid_chunks', pair)
 
@@ -351,6 +369,7 @@ def menu():
             questionary.Choice("RAM DCA          (SMA + enveloppe + SL)",   value='ram'),
             questionary.Choice("RAM DCA + Vol    (+ filtre ATR médiane)",   value='ram_vol'),
             questionary.Choice("RAM DCA + RSI    (+ filtre RSI neutre)",    value='ram_rsi'),
+            questionary.Choice("ATR Envelope     (SMA + ATR + SL ATR)",     value='atr_env'),
         ],
         style=STYLE,
     ).ask()
@@ -529,6 +548,9 @@ if __name__ == '__main__':
         if _base.startswith('kc_'):
             prefix = 'kc_wfsl'
             strategy = 'keltner'
+        elif _base.startswith('atr_env'):
+            prefix = 'atr_env'
+            strategy = 'atr_env'
         elif _base.startswith('ram_rsi'):
             prefix = 'ram_rsi'
             strategy = 'ram_rsi'
@@ -556,7 +578,7 @@ if __name__ == '__main__':
         strategy, mode, exchange, tf, pairs, grid = menu()
 
     dirname = grid_dirname(strategy, grid)
-    _pf_map2 = {'keltner': 'kc_wfsl', 'ram': 'ram', 'ram_vol': 'ram_vol', 'ram_rsi': 'ram_rsi'}
+    _pf_map2 = {'keltner': 'kc_wfsl', 'ram': 'ram', 'ram_vol': 'ram_vol', 'ram_rsi': 'ram_rsi', 'atr_env': 'atr_env'}
     prefix = _pf_map2.get(strategy, 'ram')
 
     if mode in ('full', 'liquid'):
@@ -606,7 +628,28 @@ if __name__ == '__main__':
 
     n_cpus = multiprocessing.cpu_count()
     n_parallel = min(n_cpus, len(tasks))
-    print(f"Parallélisme : {n_parallel} workers (Pool + malloc_trim)\n")
+    print(f"Parallélisme : {n_parallel} workers (Pool + recyclage)\n")
+
+    # Assembler les paires complètes au démarrage (chunks tous présents mais pas de pickle final)
+    _to_assemble = []
+    for p in to_run:
+        _pair_out = f'{cache_dir}/{prefix}_{p}_{tf}_{exchange}.pickle'
+        if not os.path.exists(_pair_out):
+            _chunk_dir = os.path.join(cache_dir, '.grid_chunks', p)
+            if os.path.isdir(_chunk_dir):
+                _existing = [f for f in os.listdir(_chunk_dir) if f.startswith('chunk_') and f.endswith('.pickle')]
+                if len(_existing) == n_chunks:
+                    _to_assemble.append(p)
+
+    if _to_assemble:
+        from concurrent.futures import ThreadPoolExecutor
+        print(f"  📦 Assemblage de {len(_to_assemble)} paires complètes...")
+        def _assemble_one(p):
+            assemble_pair(p, strategy, cache_dir)
+            return p
+        with ThreadPoolExecutor(max_workers=min(n_cpus, len(_to_assemble))) as _pool:
+            for p in _pool.map(_assemble_one, _to_assemble):
+                print(f"  📦 {p} assemblé ({n_chunks} chunks → pickle final)")
 
     t0 = time.time()
     done_chunks = 0
@@ -679,6 +722,16 @@ if __name__ == '__main__':
 
                 if not success:
                     failed.append(f"{pair}/chunk{cidx}")
+
+                # Assembler la paire si tous ses chunks sont terminés
+                if success and msg != "skip":
+                    _pair_out = f'{cache_dir}/{prefix}_{pair}_{tf}_{exchange}.pickle'
+                    if not os.path.exists(_pair_out):
+                        _chunk_dir = os.path.join(cache_dir, '.grid_chunks', pair)
+                        _existing = [f for f in os.listdir(_chunk_dir) if f.startswith('chunk_') and f.endswith('.pickle')] if os.path.isdir(_chunk_dir) else []
+                        if len(_existing) == n_chunks:
+                            assemble_pair(pair, strategy, cache_dir)
+                            _main_log(f"📦 {pair} assemblé ({n_chunks} chunks → pickle final)")
 
             # Tuer le Pool → tous les workers meurent → RAM libérée par l'OS
             pool.close()

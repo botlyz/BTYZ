@@ -100,11 +100,14 @@ async def download_lighter_all(tf='1h', symbols=None):
         start_ts = LIGHTER_START
         existing_df = None
 
-        if os.path.exists(csv_path):
-            existing_df = pd.read_csv(csv_path)
-            if len(existing_df) > 0:
-                last_ts = int(existing_df['date'].iloc[-1]) // 1000
-                start_ts = last_ts + tf_secs
+        if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+            try:
+                existing_df = pd.read_csv(csv_path)
+                if len(existing_df) > 0:
+                    last_ts = int(existing_df['date'].iloc[-1]) // 1000
+                    start_ts = last_ts + tf_secs
+            except (pd.errors.EmptyDataError, pd.errors.ParserError):
+                existing_df = None
 
         if start_ts >= end_ts:
             market_chunks[symbol] = {'skip': True}
