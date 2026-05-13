@@ -20,12 +20,11 @@ echo "│  4) Optimisation RAM DCA (opti_ram.py)  │"
 echo "│  5) RAM DCA — HYPE Lighter (marimo)     │"
 echo "│  6) Analyse (ancienne version)          │"
 echo "│  7) Evaluate ML signals (backtest OOS)  │"
-echo "│  8) AlphaSearchV2 — MEANREV_042x        │"
-echo "│  9) AlphaSearchV2 — 042_2 Full Grid    │"
-echo "│ 10) AlphaSearchV2 — 042_3 Full (limit)  │"
+echo "│  8) BTYZ Engine — Visualisation WFA     │"
+echo "│  9) BTYZ Engine — Visualisation MCCV    │"
 echo "└─────────────────────────────────────────┘"
 echo ""
-read -p "  Choix [1-10] : " CHOICE
+read -p "  Choix [1-9] : " CHOICE
 
 case "$CHOICE" in
     1) MODE="analyse"   ;;
@@ -35,9 +34,8 @@ case "$CHOICE" in
     5) MODE="ram"       ;;
     6) MODE="old"       ;;
     7) MODE="evaluate"  ;;
-    8) MODE="alpha042"  ;;
-    9) MODE="alpha042v2";;
-    10) MODE="alpha042v3";;
+    8) MODE="engine_wfa"   ;;
+    9) MODE="engine_mccv"  ;;
     *) echo "Choix invalide. Lancement de l'analyse par défaut."
        MODE="analyse"   ;;
 esac
@@ -70,12 +68,10 @@ elif [ "$MODE" = "ram" ]; then
     NB="notebooks/ram_dca_lighter.py"
 elif [ "$MODE" = "evaluate" ]; then
     NB="notebooks/evaluate.py"
-elif [ "$MODE" = "alpha042" ]; then
-    NB="/home/devbox/AlphaSearchV2/analyse_042x.py"
-elif [ "$MODE" = "alpha042v2" ]; then
-    NB="/home/devbox/AlphaSearchV2/analyse_042_v2.py"
-elif [ "$MODE" = "alpha042v3" ]; then
-    NB="/home/devbox/AlphaSearchV2/analyse_042_v3.py"
+elif [ "$MODE" = "engine_wfa" ]; then
+    NB="notebooks/analyse/analyse_engine.py"
+elif [ "$MODE" = "engine_mccv" ]; then
+    NB="notebooks/analyse/analyse_mccv.py"
 else
     NB="notebooks/analyse_full.py"
 fi
@@ -83,13 +79,8 @@ fi
 # ── 1. Lancer marimo ─────────────────────────────────────────────────────────
 export MARIMO_OUTPUT_MAX_BYTES=200000000
 echo ""
-if [ "$MODE" = "alpha042v2" ] || [ "$MODE" = "alpha042v3" ]; then
-    MARIMO_CMD="run"
-    echo "Démarrage de marimo (mode présentation) → $NB"
-else
-    MARIMO_CMD="edit"
-    echo "Démarrage de marimo → $NB"
-fi
+MARIMO_CMD="edit"
+echo "Démarrage de marimo → $NB"
 .venv/bin/marimo $MARIMO_CMD "$NB" --host 0.0.0.0 --port $PORT --headless --no-token &
 MARIMO_PID=$!
 

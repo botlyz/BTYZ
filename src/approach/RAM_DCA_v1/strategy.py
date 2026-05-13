@@ -206,11 +206,20 @@ class Strategy(BaseStrategy):
 
         n_bands = len(bands)
 
-        # Allocations (pas 0.1) — normalisées à somme=1
-        allocs_raw = [trial.suggest_float(f"alloc_{i+1}_raw", 0.1, 1.0, step=0.1)
-                      for i in range(n_bands)]
-        total = sum(allocs_raw)
-        allocs = [round(a / total, 4) for a in allocs_raw]
+        # Allocations (pas 10%) — chaque alloc ∈ {10%, 20%, …, 100%}
+        # Contrainte : somme ≤ 100% (= 10 × 10%). Pas de normalisation.
+        # On encode en entiers (1=10%, …, 10=100%) puis on cap dynamiquement
+        # la suggestion pour garantir au moins 10% restant par bande restante.
+        allocs_int: list[int] = []
+        for i in range(n_bands):
+            remaining_bands = n_bands - i - 1
+            used = sum(allocs_int)
+            # max pour cette bande = 10 - (somme déjà allouée) - (min réservé aux restantes)
+            max_here = 10 - used - remaining_bands
+            max_here = max(1, max_here)
+            ai = trial.suggest_int(f"alloc_{i+1}_int", 1, max_here)
+            allocs_int.append(ai)
+        allocs = [round(a * 0.1, 2) for a in allocs_int]  # ex: 0.3, 0.2, 0.4
 
         sl_pct = round(trial.suggest_float("sl_pct", 0.01, 0.10, step=0.005), 4)
 
