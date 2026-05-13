@@ -19,8 +19,9 @@ from vectorbtpro import vbt
 from engine.strategy_interface import BaseStrategy
 
 # Runtime hints set by the engine before each backtest:
-_target_fees: float = 0.0001    # bps × 1e-4 — overwritten by engine
-_target_freq: str = "3min"      # overwritten by engine
+_target_fees: float = 0.0001       # overwritten by engine
+_target_slippage: float = 0.0002   # 2 bps default
+_target_freq: str = "3min"         # overwritten by engine
 _init_cash: float = 10_000.0
 
 
@@ -155,7 +156,7 @@ class Strategy(BaseStrategy):
             init_cash=_init_cash,
             leverage=1.0,
             fees=_target_fees,
-            slippage=0.0,
+            slippage=_target_slippage,
             freq=_target_freq,
         )
         return pf

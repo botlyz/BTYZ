@@ -11,9 +11,11 @@ APPROACH_ROOT = PROJECT_ROOT / "src" / "approach"
 # Approach folder layout: src/approach/<APPROACH_ID>/strategy.py exporting `Strategy`
 APPROACH_STRATEGY_FILE = "strategy.py"
 
-# Trading defaults (override per-run via CLI)
-DEFAULT_FEES = 0.0001       # 1 bps
-DEFAULT_SLIPPAGE = 0.0      # let strategies decide
+# Trading defaults
+# Note: actual fees come from CLI `--bps` flag (run_grid converts bps × 1e-4).
+# DEFAULT_SLIPPAGE is the strategy-side default applied when run_backtest is
+# called outside the engine context.
+DEFAULT_SLIPPAGE = 0.0002   # 2 bps
 INIT_CASH = 10_000
 MIN_TRADES = 30
 

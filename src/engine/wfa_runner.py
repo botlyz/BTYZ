@@ -70,6 +70,7 @@ def _run_fold_worker(args):
         mod._target_fees = fees
     if hasattr(mod, "_target_freq"):
         mod._target_freq = vbt_freq
+    # _target_slippage stays at strategy module default (2 bps unless engine overrides)
 
     result = run_tpe_fold(
         train_data=train_df,
@@ -142,6 +143,7 @@ def run_pair(approach_id: str, pair: str, tf: str, fees: float, out_dir: Path,
         mod._target_fees = fees
     if hasattr(mod, "_target_freq"):
         mod._target_freq = vbt_freq
+    # _target_slippage stays at strategy module default (2 bps unless engine overrides)
 
     pair_dir = out_dir / pair
     pair_dir.mkdir(parents=True, exist_ok=True)
