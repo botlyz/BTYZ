@@ -17,15 +17,12 @@ Données:
   Le suffixe '1m' du dossier indique juste la granularité source : il n'y
   a pas de répertoire 5min séparé, on construit le 5m à partir du 1m.
 """
+
 import marimo
 
 __generated_with = "0.23.5"
 app = marimo.App(width="full")
 
-
-# ──────────────────────────────────────────────────────────────────────
-# Imports / constants / helpers
-# ──────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _imports():
@@ -149,13 +146,15 @@ def _helpers(BASE_OHLCV, LIQUIDITY_JSON, RESULTS_ROOT, json, pd):
                 out[p] = level
         return out
 
-    return (flatten_summary, fmt_param, load_liquidity_map,
-            load_ohlcv, load_summary, parse_tf_bps)
+    return (
+        flatten_summary,
+        fmt_param,
+        load_liquidity_map,
+        load_ohlcv,
+        load_summary,
+        parse_tf_bps,
+    )
 
-
-# ──────────────────────────────────────────────────────────────────────
-# §0 Build cross-run aggregate
-# ──────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _build_cross_run(RESULTS_ROOT, json, load_liquidity_map, np, pd):
@@ -227,10 +226,6 @@ def _build_cross_run(RESULTS_ROOT, json, load_liquidity_map, np, pd):
     return (cross_run_df,)
 
 
-# ──────────────────────────────────────────────────────────────────────
-# §0 Filtres UI
-# ──────────────────────────────────────────────────────────────────────
-
 @app.cell
 def _filters_ui(cross_run_df, mo):
     mo.stop(cross_run_df.empty, mo.callout(
@@ -266,8 +261,16 @@ def _filters_ui(cross_run_df, mo):
 
 
 @app.cell
-def _filtered_table(cross_run_df, f_approach, f_bps, f_liq,
-                    f_min_pos, f_min_sharpe, mo, pd):
+def _filtered_table(
+    cross_run_df,
+    f_approach,
+    f_bps,
+    f_liq,
+    f_min_pos,
+    f_min_sharpe,
+    mo,
+    pd,
+):
     _df = cross_run_df.copy()
     if f_approach.value:
         _df = _df[_df["approach"].isin(f_approach.value)]
@@ -332,10 +335,6 @@ def _load_folds(approach_id, flatten_summary, load_summary, mo, pair, run_cfg):
     return folds_df, summary
 
 
-# ──────────────────────────────────────────────────────────────────────
-# §1 Fold-by-fold table
-# ──────────────────────────────────────────────────────────────────────
-
 @app.cell
 def _section1(approach_id, fmt_param, folds_df, mo, pair, run_cfg, summary):
     _param_cols = [c for c in folds_df.columns if c.startswith("p_")]
@@ -356,11 +355,8 @@ def _section1(approach_id, fmt_param, folds_df, mo, pair, run_cfg, summary):
               f"(fees={summary.get('fees')}, n_folds={summary.get('n_folds')})"),
         mo.ui.table(_df.reset_index(drop=True), selection=None, page_size=30),
     ]))
+    return
 
-
-# ──────────────────────────────────────────────────────────────────────
-# §2 Stabilité params par fold
-# ──────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _section2_stability(folds_df, go, mo, pair, pd, run_cfg):
@@ -395,11 +391,8 @@ def _section2_stability(folds_df, go, mo, pair, pd, run_cfg):
         mo.md(f"## §2 Stabilité des paramètres — {pair}"),
         mo.ui.plotly(_fig),
     ]))
+    return
 
-
-# ──────────────────────────────────────────────────────────────────────
-# §3 WFE check
-# ──────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _section3_wfe(folds_df, go, mo, pair):
@@ -453,15 +446,21 @@ def _section3_wfe(folds_df, go, mo, pair):
             mo.ui.plotly(_fig_sc),
             mo.ui.plotly(_fig_bar),
         ]))
+    return
 
-
-# ──────────────────────────────────────────────────────────────────────
-# §4 VBT replay walk-forward — re-run kernel par fold, concat, resample 1D
-# ──────────────────────────────────────────────────────────────────────
 
 @app.cell
-def _section4_vbt_wf(approach_id, folds_df, go, load_ohlcv, mo, pair,
-                     parse_tf_bps, pd, run_cfg, summary):
+def _section4_vbt_wf(
+    approach_id,
+    folds_df,
+    go,
+    load_ohlcv,
+    mo,
+    pair,
+    parse_tf_bps,
+    pd,
+    run_cfg,
+):
     import sys as _sys
     _sys.path.insert(0, "/home/devbox/BTYZ/src")
     import warnings as _w
@@ -559,18 +558,30 @@ def _section4_vbt_wf(approach_id, folds_df, go, load_ohlcv, mo, pair,
                 name="Equity ($)",
                 line=dict(color="#3498db", width=1.6),
             ))
+            # Fold boundaries — use shape directly (add_vline + annotation casse sur Timestamps)
+            _y_min = float(_eq_1d.min())
+            _y_max = float(_eq_1d.max())
+            _annotations = []
             for _i, _ts in enumerate(_fold_starts):
-                _fig_eq.add_vline(
-                    x=_ts, line=dict(color="rgba(255,255,255,0.35)",
-                                     dash="dash", width=0.8),
-                    annotation_text=f"f{_i}", annotation_position="top",
+                _ts_iso = _ts.isoformat() if hasattr(_ts, "isoformat") else str(_ts)
+                _fig_eq.add_shape(
+                    type="line", xref="x", yref="paper",
+                    x0=_ts_iso, x1=_ts_iso, y0=0, y1=1,
+                    line=dict(color="rgba(255,255,255,0.35)",
+                              dash="dash", width=0.8),
                 )
+                _annotations.append(dict(
+                    x=_ts_iso, y=1.02, xref="x", yref="paper",
+                    text=f"f{_i}", showarrow=False,
+                    font=dict(size=10, color="#aaa"),
+                ))
             _fig_eq.update_layout(
                 title=f"{pair} · {run_cfg} — VBT replay walk-forward OOS "
                       f"(equity concaténée, resample 1D · {len(_equity_pieces)} folds · "
                       f"{_n_trades_total} trades)",
                 yaxis_title="Equity ($, base 10_000)", height=430,
                 xaxis_title="Date",
+                annotations=_annotations,
             )
 
             _fig_dd = go.Figure()
@@ -615,6 +626,7 @@ def _section4_vbt_wf(approach_id, folds_df, go, load_ohlcv, mo, pair,
                 mo.ui.plotly(_fig_dd),
                 mo.ui.plotly(_fig_folds),
             ]))
+    return
 
 
 if __name__ == "__main__":
