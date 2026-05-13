@@ -42,18 +42,17 @@ def _discover(RESULTS_ROOT):
     """Liste les approaches avec _summary.json sous wfa_tuning."""
     approaches = []
     if RESULTS_ROOT.exists():
-        for d in sorted(RESULTS_ROOT.iterdir()):
-            if not d.is_dir():
+        for _d in sorted(RESULTS_ROOT.iterdir()):
+            if not _d.is_dir():
                 continue
-            s = d / "wfa_tuning" / "_summary.json"
-            if s.exists():
-                approaches.append(d.name)
+            _s = _d / "wfa_tuning" / "_summary.json"
+            if _s.exists():
+                approaches.append(_d.name)
     return (approaches,)
 
 
 @app.cell
-def _approach_sel(_discover, mo):
-    approaches = _discover[0] if isinstance(_discover, tuple) else _discover
+def _approach_sel(approaches, mo):
     mo.stop(not approaches, mo.callout(
         mo.md("Aucun WFA tuning trouvé. Lance :\n\n"
               "```bash\npython -m engine.wfa_tuning --approach <ID> --pairs BTC ETH HYPE ...\n```"),

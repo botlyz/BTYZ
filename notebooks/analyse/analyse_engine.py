@@ -1,27 +1,28 @@
 """BTYZ engine — analyse marimo générique.
 
-Inspiré de AlphaSearchV2/analyse_042x.py.
-
-Pour chaque approche déposée sous src/approach/<ID>/ et tournée via
-`python -m engine.cli wfa ...`, ce notebook charge les résultats et offre:
-
 §0 Selectors : approach / run_cfg (tf_bps) / pair
 §1 Fold-by-fold table (params + train/test metrics)
 §2 Cross-run fee sensitivity (par paire, sur tous les bps disponibles)
 §3 Stabilité des paramètres par fold (line chart normalisé)
 §4 WFE check (train vs test sharpe scatter + return par fold + KPI stats)
 §5 Equity walk-forward (concaténée depuis trades parquet)
-§6 Table régimes (avec selection='single' → §7 trades du fold cliqué)
+§6 Table régimes (selection='single' → §7 trades du fold cliqué)
 §7 Trades du régime sélectionné
 
 Run : `marimo edit /home/devbox/BTYZ/notebooks/analyse/analyse_engine.py`
-"""
 
+Marimo paradigm rappel: chaque variable ne peut être définie que dans UNE
+seule cellule. Les variables internes (préfixe `_`) sont locales à la cellule.
+"""
 import marimo
 
 __generated_with = "0.23.5"
 app = marimo.App(width="full")
 
+
+# ─────────────────────────────────────────────────────────────────────
+# Imports + constantes
+# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _imports():
@@ -50,20 +51,23 @@ def _constants(pathlib):
     return DATA_1M, RESULTS_ROOT
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Discovery + helpers (fonctions exportées vers les autres cellules)
+# ─────────────────────────────────────────────────────────────────────
+
 @app.cell
-def _discover(RESULTS_ROOT):
-    """Liste les approaches qui ont au moins 1 run avec un summary.json."""
+def _discover_approaches(RESULTS_ROOT):
     approaches = []
     if RESULTS_ROOT.exists():
-        for d in sorted(RESULTS_ROOT.iterdir()):
-            if not d.is_dir():
+        for _d in sorted(RESULTS_ROOT.iterdir()):
+            if not _d.is_dir():
                 continue
-            full = d / "full"
-            if not full.exists():
+            _full = _d / "full"
+            if not _full.exists():
                 continue
-            for run_dir in full.iterdir():
-                if any((p / "summary.json").exists() for p in run_dir.iterdir() if p.is_dir()):
-                    approaches.append(d.name)
+            for _run_dir in _full.iterdir():
+                if any((p / "summary.json").exists() for p in _run_dir.iterdir() if p.is_dir()):
+                    approaches.append(_d.name)
                     break
     return (approaches,)
 
@@ -103,7 +107,6 @@ def _helpers(DATA_1M, RESULTS_ROOT, json, pd):
             return json.load(f)
 
     def fmt_param(v):
-        """Lists → '[a, b, c]', floats → 4 decimals, else raw."""
         if isinstance(v, (list, tuple)):
             if all(isinstance(x, float) for x in v):
                 return "[" + ", ".join(f"{x:.4f}" for x in v) + "]"
@@ -113,7 +116,6 @@ def _helpers(DATA_1M, RESULTS_ROOT, json, pd):
         return v
 
     def flatten_summary(summary):
-        """summary → list[dict] (1 row per fold)."""
         rows = []
         for fd in summary.get("folds", []):
             params = fd.get("params", {})
@@ -142,7 +144,6 @@ def _helpers(DATA_1M, RESULTS_ROOT, json, pd):
         return df
 
     def load_ohlcv(pair, tf):
-        """1m CSV → resample to tf (e.g. '5min')."""
         fp = DATA_1M / f"{pair}.csv"
         if not fp.exists():
             return None
@@ -159,26 +160,18 @@ def _helpers(DATA_1M, RESULTS_ROOT, json, pd):
         except Exception:
             return 0.0
 
-    return (
-        flatten_summary,
-        fmt_param,
-        list_pairs,
-        list_runs,
-        load_summary,
-        safe_float,
-    )
+    return (flatten_summary, fmt_param, list_pairs, list_runs, load_summary)
 
 
-@app.cell
-def _selectors():
-    approaches = _discover[0] if isinstance(_discover, tuple) else _discover
-    return (approaches,)
-
+# ─────────────────────────────────────────────────────────────────────
+# §0 Selectors (cascade approach → run → pair)
+# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _approach_selector(approaches, mo):
     mo.stop(not approaches, mo.callout(
-        mo.md("Aucune approche trouvée dans `results/`. Lance d'abord `python -m engine.cli wfa --approach <ID> ...`"),
+        mo.md("Aucune approche trouvée dans `results/`. Lance d'abord "
+              "`python -m engine.cli wfa --approach <ID> ...`"),
         kind="warn"
     ))
     approach = mo.ui.dropdown(
@@ -192,11 +185,11 @@ def _approach_selector(approaches, mo):
 
 @app.cell
 def _run_selector(approach, list_runs, mo):
-    runs = list_runs(approach.value) if approach.value else []
-    mo.stop(not runs, mo.callout(mo.md(f"Aucun run trouvé pour `{approach.value}`"), kind="warn"))
+    _runs = list_runs(approach.value) if approach.value else []
+    mo.stop(not _runs, mo.callout(mo.md(f"Aucun run pour `{approach.value}`"), kind="warn"))
     run_cfg = mo.ui.dropdown(
-        options={r: r for r in runs},
-        value=runs[0],
+        options={r: r for r in _runs},
+        value=_runs[0],
         label="Run (tf_bps)",
     )
     mo.output.replace(mo.hstack([run_cfg], justify="start", gap=2))
@@ -205,11 +198,11 @@ def _run_selector(approach, list_runs, mo):
 
 @app.cell
 def _pair_selector(approach, list_pairs, mo, run_cfg):
-    pairs = list_pairs(approach.value, run_cfg.value) if approach.value and run_cfg.value else []
-    mo.stop(not pairs, mo.callout(mo.md(f"Aucune paire dans `{run_cfg.value}`"), kind="warn"))
+    _pairs = list_pairs(approach.value, run_cfg.value) if approach.value and run_cfg.value else []
+    mo.stop(not _pairs, mo.callout(mo.md(f"Aucune paire dans `{run_cfg.value}`"), kind="warn"))
     pair = mo.ui.dropdown(
-        options={p: p for p in pairs},
-        value=pairs[0],
+        options={p: p for p in _pairs},
+        value=_pairs[0],
         label="Paire",
     )
     mo.output.replace(mo.hstack([pair], justify="start", gap=2))
@@ -221,9 +214,13 @@ def _load(approach, flatten_summary, load_summary, mo, pair, run_cfg):
     summary = load_summary(approach.value, run_cfg.value, pair.value)
     mo.stop(summary is None, mo.callout(mo.md("summary.json introuvable."), kind="warn"))
     folds_df = flatten_summary(summary)
-    mo.stop(folds_df.empty, mo.callout(mo.md("Aucun fold valide dans ce summary."), kind="warn"))
+    mo.stop(folds_df.empty, mo.callout(mo.md("Aucun fold valide."), kind="warn"))
     return folds_df, summary
 
+
+# ─────────────────────────────────────────────────────────────────────
+# §1 Fold-by-fold table
+# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _section1(approach, fmt_param, folds_df, mo, pair, run_cfg, summary):
@@ -234,90 +231,90 @@ def _section1(approach, fmt_param, folds_df, mo, pair, run_cfg, summary):
         "test_dd_pct", "test_dd_dur_days", "test_trades",
     ]
     _display = [c for c in _display if c in folds_df.columns]
-
     _df = folds_df[_display].copy()
-    # Format lists & floats for display
     for _c in _param_cols:
         _df[_c] = _df[_c].apply(fmt_param)
     for _c in _df.select_dtypes(include="float").columns:
         _df[_c] = _df[_c].round(4)
-
     mo.output.replace(mo.vstack([
         mo.md(f"## §1 Folds — **{approach.value}** · {pair.value} · {run_cfg.value} "
               f"(fees={summary.get('fees')}, n_folds={summary.get('n_folds')})"),
         mo.ui.table(_df.reset_index(drop=True), selection=None, page_size=30),
     ]))
-    return
 
+
+# ─────────────────────────────────────────────────────────────────────
+# §2 Cross-run fee sensitivity (toutes les runs pour cette paire)
+# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
-def _section2(
-    RESULTS_ROOT,
-    approach,
-    go,
-    json,
-    list_runs,
-    mo,
-    np,
-    pair,
-    pd,
-    safe_float,
-):
-    runs = list_runs(approach.value)
-    rows = []
-    for rc in runs:
-        sj = RESULTS_ROOT / approach.value / "full" / rc / pair.value / "summary.json"
-        if not sj.exists():
+def _section2(RESULTS_ROOT, approach, go, json, list_runs, mo, np, pair, pd):
+    _all_runs = list_runs(approach.value)
+    _rows = []
+    for _rc in _all_runs:
+        _sj = RESULTS_ROOT / approach.value / "full" / _rc / pair.value / "summary.json"
+        if not _sj.exists():
             continue
-        d = json.loads(sj.read_text())
-        test_rets = [safe_float(f.get("test_metrics", {}).get("total_return_pct")) for f in d.get("folds", [])]
-        test_shs  = [safe_float(f.get("test_metrics", {}).get("sharpe_ratio"))   for f in d.get("folds", [])]
-        clean_rets = [r for r in test_rets if not np.isnan(r)]
-        clean_shs  = [s for s in test_shs  if not np.isnan(s)]
-        n_prof = sum(1 for r in clean_rets if r > 0)
-        rows.append({
-            "run": rc,
-            "n_folds": len(d.get("folds", [])),
-            "avg_test_ret_pct": float(np.mean(clean_rets)) if clean_rets else 0.0,
-            "median_test_sharpe": float(np.median(clean_shs)) if clean_shs else 0.0,
-            "n_prof_folds": n_prof,
-            "pct_prof": (n_prof / len(clean_rets) * 100) if clean_rets else 0.0,
+        _d = json.loads(_sj.read_text())
+        _rets = []
+        _shs = []
+        for _f in _d.get("folds", []):
+            _tm = _f.get("test_metrics", {})
+            try:
+                _rets.append(float(_tm.get("total_return_pct")))
+            except (TypeError, ValueError):
+                pass
+            try:
+                _shs.append(float(_tm.get("sharpe_ratio")))
+            except (TypeError, ValueError):
+                pass
+        _n_prof = sum(1 for r in _rets if r > 0)
+        _rows.append({
+            "run": _rc,
+            "n_folds": len(_d.get("folds", [])),
+            "avg_test_ret_pct": float(np.mean(_rets)) if _rets else 0.0,
+            "median_test_sharpe": float(np.median(_shs)) if _shs else 0.0,
+            "n_prof_folds": _n_prof,
+            "pct_prof": (_n_prof / len(_rets) * 100) if _rets else 0.0,
         })
 
-    if not rows:
-        mo.output.replace(mo.md("## §2 Cross-run fee sensitivity\n_Pas de données._"))
+    if not _rows:
+        mo.output.replace(mo.md("## §2 Cross-run fee sensitivity — _pas de données._"))
     else:
-        rs = pd.DataFrame(rows)
-        _colors = ["#2ecc71" if v > 0 else "#e74c3c" for v in rs["avg_test_ret_pct"]]
+        _rs = pd.DataFrame(_rows)
+        _colors = ["#2ecc71" if v > 0 else "#e74c3c" for v in _rs["avg_test_ret_pct"]]
         _fig = go.Figure([go.Bar(
-            x=rs["run"], y=rs["avg_test_ret_pct"], marker_color=_colors,
-            text=[f"{r:.1f}%" for r in rs["avg_test_ret_pct"]], textposition="outside",
+            x=_rs["run"], y=_rs["avg_test_ret_pct"], marker_color=_colors,
+            text=[f"{r:.1f}%" for r in _rs["avg_test_ret_pct"]], textposition="outside",
         )])
         _fig.update_layout(
             title=f"{pair.value} — return WF moyen par run (fee sensitivity)",
             yaxis_title="avg test return %", height=320,
-            shapes=[dict(type="line", x0=-0.5, x1=len(rs)-0.5, y0=0, y1=0,
+            shapes=[dict(type="line", x0=-0.5, x1=len(_rs)-0.5, y0=0, y1=0,
                          line=dict(color="white", dash="dot"))],
         )
         _fig2 = go.Figure([go.Bar(
-            x=rs["run"], y=rs["pct_prof"], marker_color=["#3498db"] * len(rs),
-            text=[f"{int(n)}/{int(t)}" for n, t in zip(rs["n_prof_folds"], rs["n_folds"])],
+            x=_rs["run"], y=_rs["pct_prof"], marker_color=["#3498db"] * len(_rs),
+            text=[f"{int(n)}/{int(t)}" for n, t in zip(_rs["n_prof_folds"], _rs["n_folds"])],
             textposition="outside",
         )])
         _fig2.update_layout(
             title=f"{pair.value} — % folds rentables par run",
             yaxis_title="% folds rentables", height=280,
         )
-        for _c in rs.select_dtypes(include="float").columns:
-            rs[_c] = rs[_c].round(3)
+        for _c in _rs.select_dtypes(include="float").columns:
+            _rs[_c] = _rs[_c].round(3)
         mo.output.replace(mo.vstack([
             mo.md(f"## §2 Cross-run fee sensitivity — {pair.value}"),
-            mo.ui.table(rs, selection=None),
+            mo.ui.table(_rs, selection=None),
             mo.ui.plotly(_fig),
             mo.ui.plotly(_fig2),
         ]))
-    return
 
+
+# ─────────────────────────────────────────────────────────────────────
+# §3 Param stability per fold
+# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _section3(folds_df, go, mo, pair, pd, run_cfg):
@@ -325,7 +322,6 @@ def _section3(folds_df, go, mo, pair, pd, run_cfg):
     _fig = go.Figure()
     for _pc in _param_cols:
         _vals = folds_df[_pc]
-        # Skip list-valued params (env_levels, allocations) — plot via separate trace
         if _vals.apply(lambda x: isinstance(x, list)).any():
             continue
         _num = pd.to_numeric(_vals, errors="coerce")
@@ -346,18 +342,20 @@ def _section3(folds_df, go, mo, pair, pd, run_cfg):
         mo.md(f"## §3 Stabilité params — {pair.value}"),
         mo.ui.plotly(_fig),
     ]))
-    return
 
+
+# ─────────────────────────────────────────────────────────────────────
+# §4 WFE check
+# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _section4(folds_df, go, mo, pair):
     _df = folds_df.dropna(subset=["train_sharpe", "test_sharpe"])
     if _df.empty:
-        mo.output.replace(mo.md("## §4 WFE check\n_Pas assez de données._"))
+        mo.output.replace(mo.md("## §4 WFE check — _pas assez de données._"))
     else:
         _corr = _df["train_sharpe"].corr(_df["test_sharpe"])
         _pct_pos = (_df["test_return_pct"] > 0).mean() * 100
-
         _fig_scatter = go.Figure()
         _fig_scatter.add_trace(go.Scatter(
             x=_df["train_sharpe"], y=_df["test_sharpe"],
@@ -372,7 +370,6 @@ def _section4(folds_df, go, mo, pair):
             title=f"{pair.value} — Sharpe train vs test (corr={_corr:.2f})",
             xaxis_title="Train Sharpe", yaxis_title="Test Sharpe", height=380,
         )
-
         _colors = ["#2ecc71" if v > 0 else "#e74c3c" for v in _df["test_return_pct"]]
         _fig_bar = go.Figure([go.Bar(
             x=_df["fold"], y=_df["test_return_pct"], marker_color=_colors,
@@ -386,7 +383,6 @@ def _section4(folds_df, go, mo, pair):
             title=f"{pair.value} — Train vs Test return % par fold",
             xaxis_title="Fold", yaxis_title="Return %", height=300,
         )
-
         mo.output.replace(mo.vstack([
             mo.md(f"## §4 WFE check — {pair.value}"),
             mo.hstack([
@@ -398,94 +394,93 @@ def _section4(folds_df, go, mo, pair):
             mo.ui.plotly(_fig_scatter),
             mo.ui.plotly(_fig_bar),
         ]))
-    return
 
+
+# ─────────────────────────────────────────────────────────────────────
+# §5 Walk-forward equity (from trades parquet)
+# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _section5(RESULTS_ROOT, approach, folds_df, go, mo, pair, pd, run_cfg):
-    """Concaténation des PnL par fold depuis trades parquet — pas de re-run kernel."""
-    trades_dir = RESULTS_ROOT / approach.value / "full" / run_cfg.value / pair.value / "trades"
-    if not trades_dir.exists():
-        mo.output.replace(mo.md("## §5 Equity walk-forward\n_Pas de trades parquet._"))
+    _trades_dir = RESULTS_ROOT / approach.value / "full" / run_cfg.value / pair.value / "trades"
+    if not _trades_dir.exists():
+        mo.output.replace(mo.md("## §5 Equity walk-forward — _pas de trades parquet._"))
     else:
-        # Use init_cash=10_000 (BTYZ default) — equity in $ relative to start
-        INIT = 10_000.0
-        pieces = []
-        cumul = INIT
-        fold_starts = []
-        for fr in sorted(folds_df.to_dict(orient="records"), key=lambda r: r["fold"]):
-            i = int(fr["fold"])
-            fp = trades_dir / f"fold_{i}.parquet"
-            if not fp.exists():
+        _INIT = 10_000.0
+        _pieces = []
+        _cumul = _INIT
+        _fold_starts = []
+        for _fr in sorted(folds_df.to_dict(orient="records"), key=lambda r: r["fold"]):
+            _i = int(_fr["fold"])
+            _fp = _trades_dir / f"fold_{_i}.parquet"
+            if not _fp.exists():
                 continue
-            t = pd.read_parquet(fp)
-            if t.empty:
+            _t = pd.read_parquet(_fp)
+            if _t.empty:
                 continue
-            t = t.sort_values("exit_time")
-            # Cumulative dollar PnL within this fold, then rebase to running cumul
-            pnl_dollar = t["pnl"].cumsum() + cumul
-            ts = pd.to_datetime(t["exit_time"], utc=True)
-            pieces.append(pd.DataFrame({"ts": ts, "eq": pnl_dollar}))
-            cumul = float(pnl_dollar.iloc[-1])
-            fold_starts.append(ts.iloc[0])
+            _t = _t.sort_values("exit_time")
+            _pnl_dollar = _t["pnl"].cumsum() + _cumul
+            _ts = pd.to_datetime(_t["exit_time"], utc=True)
+            _pieces.append(pd.DataFrame({"ts": _ts, "eq": _pnl_dollar}))
+            _cumul = float(_pnl_dollar.iloc[-1])
+            _fold_starts.append(_ts.iloc[0])
 
-        if not pieces:
-            mo.output.replace(mo.md("## §5 Equity walk-forward\n_Aucun fold avec trades._"))
+        if not _pieces:
+            mo.output.replace(mo.md("## §5 Equity walk-forward — _aucun fold avec trades._"))
         else:
-            eq = pd.concat(pieces, ignore_index=True).sort_values("ts").reset_index(drop=True)
-            running_max = eq["eq"].cummax()
-            dd_pct = (eq["eq"] / running_max - 1) * 100
-            total_ret = (eq["eq"].iloc[-1] / INIT - 1) * 100
-            max_dd = float(dd_pct.min())
-            n_trades_total = sum(len(p) for p in pieces)
+            _eq = pd.concat(_pieces, ignore_index=True).sort_values("ts").reset_index(drop=True)
+            _running_max = _eq["eq"].cummax()
+            _dd_pct = (_eq["eq"] / _running_max - 1) * 100
+            _total_ret = (_eq["eq"].iloc[-1] / _INIT - 1) * 100
+            _max_dd = float(_dd_pct.min())
+            _n_trades_total = sum(len(p) for p in _pieces)
 
             _fig = go.Figure()
             _fig.add_trace(go.Scatter(
-                x=eq["ts"], y=eq["eq"], mode="lines",
+                x=_eq["ts"], y=_eq["eq"], mode="lines",
                 name="Equity ($)", line=dict(color="#3498db", width=1.6),
             ))
-            for _ts in fold_starts:
-                _fig.add_vline(x=_ts, line=dict(color="white", dash="dash", width=0.5), opacity=0.3)
+            for _x in _fold_starts:
+                _fig.add_vline(x=_x, line=dict(color="white", dash="dash", width=0.5), opacity=0.3)
             _fig.update_layout(
-                title=f"{pair.value} · {run_cfg.value} — equity WF concaténée ({len(pieces)} folds · {n_trades_total} trades)",
+                title=f"{pair.value} · {run_cfg.value} — equity WF "
+                      f"({len(_pieces)} folds · {_n_trades_total} trades)",
                 yaxis_title="Equity ($)", height=380,
             )
 
             _fig_dd = go.Figure()
             _fig_dd.add_trace(go.Scatter(
-                x=eq["ts"], y=dd_pct, mode="lines", fill="tozeroy",
+                x=_eq["ts"], y=_dd_pct, mode="lines", fill="tozeroy",
                 line=dict(color="#e74c3c", width=1), name="Drawdown %",
             ))
-            _fig_dd.update_layout(
-                title="Drawdown %", yaxis_title="%", height=220,
-            )
+            _fig_dd.update_layout(title="Drawdown %", yaxis_title="%", height=220)
 
             mo.output.replace(mo.vstack([
                 mo.md(f"## §5 Walk-forward equity — {pair.value}"),
                 mo.hstack([
-                    mo.stat(label="Return total", value=f"{total_ret:.1f}%"),
-                    mo.stat(label="Max DD", value=f"{max_dd:.1f}%"),
-                    mo.stat(label="N trades", value=str(n_trades_total)),
-                    mo.stat(label="N folds OK", value=f"{len(pieces)}/{len(folds_df)}"),
+                    mo.stat(label="Return total", value=f"{_total_ret:.1f}%"),
+                    mo.stat(label="Max DD", value=f"{_max_dd:.1f}%"),
+                    mo.stat(label="N trades", value=str(_n_trades_total)),
+                    mo.stat(label="N folds OK", value=f"{len(_pieces)}/{len(folds_df)}"),
                 ], justify="start", gap=4),
                 mo.ui.plotly(_fig),
                 mo.ui.plotly(_fig_dd),
             ]))
-    return
 
+
+# ─────────────────────────────────────────────────────────────────────
+# §6 Régimes (clic → §7)
+# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _section6(fmt_param, folds_df, mo, pair, run_cfg):
     _df = folds_df.copy()
     _param_cols = [c for c in _df.columns if c.startswith("p_")]
-
     for _c in ["train_start", "train_end", "test_start", "test_end"]:
         if _c in _df.columns:
             _df[_c] = _df[_c].dt.strftime("%Y-%m-%d %H:%M").fillna("")
-
     for _c in _param_cols:
         _df[_c] = _df[_c].apply(fmt_param)
-
     _display = (
         ["fold", "train_start", "train_end", "test_start", "test_end"]
         + _param_cols
@@ -496,55 +491,44 @@ def _section6(fmt_param, folds_df, mo, pair, run_cfg):
     _df_show = _df[_display].reset_index(drop=True)
     for _c in _df_show.select_dtypes(include="float").columns:
         _df_show[_c] = _df_show[_c].round(4)
-
     regimes_table = mo.ui.table(_df_show, selection="single", page_size=30)
-
     mo.output.replace(mo.vstack([
         mo.md(f"## §6 Régimes WF — {pair.value} · {run_cfg.value}"),
-        mo.md("_Un régime = fenêtre train → params optimaux → perf test. Clique pour voir les trades §7._"),
+        mo.md("_Un régime = fenêtre train → params optimaux → perf test. Clique pour §7._"),
         regimes_table,
     ]))
     return (regimes_table,)
 
 
+# ─────────────────────────────────────────────────────────────────────
+# §7 Trades du régime sélectionné
+# ─────────────────────────────────────────────────────────────────────
+
 @app.cell
-def _section7(
-    RESULTS_ROOT,
-    approach,
-    folds_df,
-    mo,
-    pair,
-    pd,
-    regimes_table,
-    run_cfg,
-):
+def _section7(RESULTS_ROOT, approach, folds_df, mo, pair, pd, regimes_table, run_cfg):
     _sel = regimes_table.value
     if _sel is None or len(_sel) == 0:
-        mo.output.replace(mo.md("## §7 Trades du régime\n_Clique sur une ligne du tableau §6 pour afficher les trades._"))
+        mo.output.replace(mo.md("## §7 Trades du régime\n_Clique une ligne dans §6._"))
     else:
         _fold_idx = int(_sel.iloc[0]["fold"])
         _trades_fp = RESULTS_ROOT / approach.value / "full" / run_cfg.value / pair.value / "trades" / f"fold_{_fold_idx}.parquet"
         if not _trades_fp.exists():
-            mo.output.replace(mo.callout(mo.md(f"Pas de trades parquet pour fold {_fold_idx}."), kind="warn"))
+            mo.output.replace(mo.callout(mo.md(f"Pas de trades parquet fold {_fold_idx}."), kind="warn"))
         else:
             _t = pd.read_parquet(_trades_fp).copy()
             _fold_row = folds_df[folds_df["fold"] == _fold_idx]
+            _params = {}
             if not _fold_row.empty:
                 _r = _fold_row.iloc[0]
                 _params = {k[2:]: v for k, v in _r.items() if k.startswith("p_")}
-            else:
-                _params = {}
-
             _n = len(_t)
             _wr = (_t["return_pct"] > 0).mean() * 100 if _n > 0 else 0
             _pnl_total = _t["pnl"].sum() if _n > 0 else 0
-            _wins = _t[_t["pnl"] > 0]["pnl"].sum()
-            _losses = abs(_t[_t["pnl"] < 0]["pnl"].sum())
+            _wins = _t[_t["pnl"] > 0]["pnl"].sum() if _n > 0 else 0
+            _losses = abs(_t[_t["pnl"] < 0]["pnl"].sum()) if _n > 0 else 0
             _pf = _wins / _losses if _losses > 0 else float("inf")
-
             for _c in _t.select_dtypes(include="float").columns:
                 _t[_c] = _t[_c].round(6)
-
             mo.output.replace(mo.vstack([
                 mo.md(f"## §7 Trades — Fold {_fold_idx} · {pair.value}"),
                 mo.md(f"_Params: `{_params}`_"),
@@ -556,7 +540,6 @@ def _section7(
                 ], justify="start", gap=4),
                 mo.ui.table(_t.reset_index(drop=True), selection=None, page_size=50),
             ]))
-    return
 
 
 if __name__ == "__main__":

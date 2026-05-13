@@ -47,17 +47,16 @@ def _discover_mccv(RESULTS_ROOT):
     """Liste les approches avec un dossier mccv/ non vide."""
     approaches = []
     if RESULTS_ROOT.exists():
-        for d in sorted(RESULTS_ROOT.iterdir()):
-            if d.is_dir() and (d / "mccv").exists() and any((d / "mccv").iterdir()):
-                approaches.append(d.name)
+        for _d in sorted(RESULTS_ROOT.iterdir()):
+            if _d.is_dir() and (_d / "mccv").exists() and any((_d / "mccv").iterdir()):
+                approaches.append(_d.name)
     return (approaches,)
 
 
 @app.cell
-def _approach_selector(_discover_mccv, mo):
-    approaches = _discover_mccv[0] if isinstance(_discover_mccv, tuple) else _discover_mccv
+def _approach_selector(approaches, mo):
     mo.stop(not approaches, mo.callout(
-        mo.md("Aucun résultat MCCV trouvé. Lance d'abord :\n\n"
+        mo.md("Aucun résultat MCCV trouvé. Lance :\n\n"
               "```bash\npython -m engine.cli mccv --approach <ID> --pairs ... --tf ... --bps ... --n-targets 12\n```"),
         kind="warn"
     ))
