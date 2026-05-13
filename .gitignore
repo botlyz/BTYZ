@@ -15,3 +15,4 @@ liquidity_v*.json
 liquidity_new.json
 research/*.log
 notebooks/__marimo__/session/
+results/
