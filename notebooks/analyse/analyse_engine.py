@@ -16,15 +16,12 @@ Pour chaque approche déposée sous src/approach/<ID>/ et tournée via
 
 Run : `marimo edit /home/devbox/BTYZ/notebooks/analyse/analyse_engine.py`
 """
+
 import marimo
 
-__generated_with = "0.13.2"
+__generated_with = "0.23.5"
 app = marimo.App(width="full")
 
-
-# ─────────────────────────────────────────────────────────────────────
-# Imports + constantes
-# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _imports():
@@ -43,7 +40,7 @@ def _imports():
 
     pio.renderers.default = "png"
     _w.filterwarnings("ignore", category=RuntimeWarning)
-    return go, json, mo, np, pathlib, pd, pio
+    return go, json, mo, np, pathlib, pd
 
 
 @app.cell
@@ -68,12 +65,8 @@ def _discover(RESULTS_ROOT):
                 if any((p / "summary.json").exists() for p in run_dir.iterdir() if p.is_dir()):
                     approaches.append(d.name)
                     break
-    return (sorted(set(approaches)),)
+    return (approaches,)
 
-
-# ─────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _helpers(DATA_1M, RESULTS_ROOT, json, pd):
@@ -166,16 +159,18 @@ def _helpers(DATA_1M, RESULTS_ROOT, json, pd):
         except Exception:
             return 0.0
 
-    return (flatten_summary, fees_from_run, fmt_param, list_pairs, list_runs,
-            load_ohlcv, load_summary, safe_float, safe_int)
+    return (
+        flatten_summary,
+        fmt_param,
+        list_pairs,
+        list_runs,
+        load_summary,
+        safe_float,
+    )
 
-
-# ─────────────────────────────────────────────────────────────────────
-# §0 Selectors
-# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
-def _selectors(_discover, mo):
+def _selectors():
     approaches = _discover[0] if isinstance(_discover, tuple) else _discover
     return (approaches,)
 
@@ -221,10 +216,6 @@ def _pair_selector(approach, list_pairs, mo, run_cfg):
     return (pair,)
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Load summary + flatten
-# ─────────────────────────────────────────────────────────────────────
-
 @app.cell
 def _load(approach, flatten_summary, load_summary, mo, pair, run_cfg):
     summary = load_summary(approach.value, run_cfg.value, pair.value)
@@ -234,12 +225,8 @@ def _load(approach, flatten_summary, load_summary, mo, pair, run_cfg):
     return folds_df, summary
 
 
-# ─────────────────────────────────────────────────────────────────────
-# §1 Fold-by-fold table
-# ─────────────────────────────────────────────────────────────────────
-
 @app.cell
-def _section1(approach, fmt_param, folds_df, mo, pair, pd, run_cfg, summary):
+def _section1(approach, fmt_param, folds_df, mo, pair, run_cfg, summary):
     _param_cols = [c for c in folds_df.columns if c.startswith("p_")]
     _display = ["fold"] + _param_cols + [
         "train_sharpe", "test_sharpe",
@@ -260,14 +247,22 @@ def _section1(approach, fmt_param, folds_df, mo, pair, pd, run_cfg, summary):
               f"(fees={summary.get('fees')}, n_folds={summary.get('n_folds')})"),
         mo.ui.table(_df.reset_index(drop=True), selection=None, page_size=30),
     ]))
+    return
 
-
-# ─────────────────────────────────────────────────────────────────────
-# §2 Cross-run fee sensitivity
-# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
-def _section2(RESULTS_ROOT, approach, go, json, list_runs, mo, np, pair, pd, safe_float):
+def _section2(
+    RESULTS_ROOT,
+    approach,
+    go,
+    json,
+    list_runs,
+    mo,
+    np,
+    pair,
+    pd,
+    safe_float,
+):
     runs = list_runs(approach.value)
     rows = []
     for rc in runs:
@@ -321,11 +316,8 @@ def _section2(RESULTS_ROOT, approach, go, json, list_runs, mo, np, pair, pd, saf
             mo.ui.plotly(_fig),
             mo.ui.plotly(_fig2),
         ]))
+    return
 
-
-# ─────────────────────────────────────────────────────────────────────
-# §3 Param stability per fold
-# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _section3(folds_df, go, mo, pair, pd, run_cfg):
@@ -354,11 +346,8 @@ def _section3(folds_df, go, mo, pair, pd, run_cfg):
         mo.md(f"## §3 Stabilité params — {pair.value}"),
         mo.ui.plotly(_fig),
     ]))
+    return
 
-
-# ─────────────────────────────────────────────────────────────────────
-# §4 WFE check
-# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _section4(folds_df, go, mo, pair):
@@ -409,11 +398,8 @@ def _section4(folds_df, go, mo, pair):
             mo.ui.plotly(_fig_scatter),
             mo.ui.plotly(_fig_bar),
         ]))
+    return
 
-
-# ─────────────────────────────────────────────────────────────────────
-# §5 Walk-forward equity (rebuilt from trades parquet)
-# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _section5(RESULTS_ROOT, approach, folds_df, go, mo, pair, pd, run_cfg):
@@ -485,11 +471,8 @@ def _section5(RESULTS_ROOT, approach, folds_df, go, mo, pair, pd, run_cfg):
                 mo.ui.plotly(_fig),
                 mo.ui.plotly(_fig_dd),
             ]))
+    return
 
-
-# ─────────────────────────────────────────────────────────────────────
-# §6 Régimes (clic → §7)
-# ─────────────────────────────────────────────────────────────────────
 
 @app.cell
 def _section6(fmt_param, folds_df, mo, pair, run_cfg):
@@ -524,12 +507,17 @@ def _section6(fmt_param, folds_df, mo, pair, run_cfg):
     return (regimes_table,)
 
 
-# ─────────────────────────────────────────────────────────────────────
-# §7 Trades du régime sélectionné
-# ─────────────────────────────────────────────────────────────────────
-
 @app.cell
-def _section7(RESULTS_ROOT, approach, folds_df, mo, pair, pd, regimes_table, run_cfg):
+def _section7(
+    RESULTS_ROOT,
+    approach,
+    folds_df,
+    mo,
+    pair,
+    pd,
+    regimes_table,
+    run_cfg,
+):
     _sel = regimes_table.value
     if _sel is None or len(_sel) == 0:
         mo.output.replace(mo.md("## §7 Trades du régime\n_Clique sur une ligne du tableau §6 pour afficher les trades._"))
@@ -568,6 +556,7 @@ def _section7(RESULTS_ROOT, approach, folds_df, mo, pair, pd, regimes_table, run
                 ], justify="start", gap=4),
                 mo.ui.table(_t.reset_index(drop=True), selection=None, page_size=50),
             ]))
+    return
 
 
 if __name__ == "__main__":

@@ -22,9 +22,10 @@ echo "│  6) Analyse (ancienne version)          │"
 echo "│  7) Evaluate ML signals (backtest OOS)  │"
 echo "│  8) BTYZ Engine — Visualisation WFA     │"
 echo "│  9) BTYZ Engine — Visualisation MCCV    │"
+echo "│ 10) BTYZ Engine — WFA Tuning comparator │"
 echo "└─────────────────────────────────────────┘"
 echo ""
-read -p "  Choix [1-9] : " CHOICE
+read -p "  Choix [1-10] : " CHOICE
 
 case "$CHOICE" in
     1) MODE="analyse"   ;;
@@ -36,6 +37,7 @@ case "$CHOICE" in
     7) MODE="evaluate"  ;;
     8) MODE="engine_wfa"   ;;
     9) MODE="engine_mccv"  ;;
+    10) MODE="engine_tuning";;
     *) echo "Choix invalide. Lancement de l'analyse par défaut."
        MODE="analyse"   ;;
 esac
@@ -72,6 +74,8 @@ elif [ "$MODE" = "engine_wfa" ]; then
     NB="notebooks/analyse/analyse_engine.py"
 elif [ "$MODE" = "engine_mccv" ]; then
     NB="notebooks/analyse/analyse_mccv.py"
+elif [ "$MODE" = "engine_tuning" ]; then
+    NB="notebooks/analyse/analyse_wfa_tuning.py"
 else
     NB="notebooks/analyse_full.py"
 fi
