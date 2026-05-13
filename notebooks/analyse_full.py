@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.21.1"
+__generated_with = "0.23.5"
 app = marimo.App(width="wide")
 
 
@@ -173,11 +173,15 @@ def _controls(glob_mod, mo, os):
     min_return = mo.ui.slider(-50.0, 100.0, value=0.0, step=0.5, label='Return > X% (-50=off)', show_value=True)
     min_pct_windows = mo.ui.slider(0, 100, value=50, step=10, label='% fenêtres min qui passent', show_value=True)
     min_trades = mo.ui.slider(0, 100, value=30, step=5, label='Trades min par fenêtre (0=off)', show_value=True)
+    plateau_only = mo.ui.checkbox(value=True, label='§6 : garder seulement les plateaux')
+    top_n_per_pair = mo.ui.slider(1, 50, value=3, step=1, label='§6bis : top N combos par paire', show_value=True)
+    min_total_trades = mo.ui.slider(0, 2000, value=200, step=10, label='§6bis : total trades min (train+test)', show_value=True)
 
     mo.output.replace(mo.vstack([
         mo.md("## Critères de filtrage"),
         mo.hstack([folder_selector, pattern_input, refresh_btn], justify="start", gap=2),
         mo.hstack([max_dd, min_wr, min_sharpe, min_return, min_pct_windows, min_trades], justify="start", gap=2),
+        mo.hstack([plateau_only, top_n_per_pair, min_total_trades], justify="start", gap=2),
     ]))
     return (
         folder_selector,
@@ -185,9 +189,12 @@ def _controls(glob_mod, mo, os):
         min_pct_windows,
         min_return,
         min_sharpe,
+        min_total_trades,
         min_trades,
         min_wr,
         pattern_input,
+        plateau_only,
+        top_n_per_pair,
     )
 
 
@@ -376,7 +383,6 @@ def _section2(combo_scores, global_stats_df, go, mo, pairs, valid_combos):
 def _section3(
     combo_scores,
     detected_params,
-    fmt_params,
     mo,
     np,
     pairs,
@@ -384,65 +390,79 @@ def _section3(
     test_data,
     valid_combos,
 ):
-    _rows = []
-    for _pair in pairs:
-        _vcs = valid_combos.get(_pair)
-        _test = test_data.get(_pair)
-        if _vcs is None or len(_vcs) == 0 or _test is None:
-            continue
-        _scores = combo_scores.get(_pair, pd.Series(dtype=float))
-        _pair_params3 = [p for p in detected_params if p in _test.index.names] or \
-                        [n for n in _test.index.names if n not in {'split', 'set', None}]
-
-        for _combo in _vcs:
-            try:
-                _grp = _test.xs(_combo, level=_pair_params3)
-            except KeyError:
+    import warnings as _warnings
+    _frames = []
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore", RuntimeWarning)
+        for _pair in pairs:
+            _vcs = valid_combos.get(_pair)
+            _test = test_data.get(_pair)
+            if _vcs is None or len(_vcs) == 0 or _test is None:
                 continue
+            _scores = combo_scores.get(_pair, pd.Series(dtype=float))
+            _pair_params3 = [p for p in detected_params if p in _test.index.names] or \
+                            [n for n in _test.index.names if n not in {'split', 'set', None}]
 
-            _sr = _grp['Sharpe Ratio'].astype(float)
-            _ret = _grp['Total Return [%]'].astype(float)
-            _dd = _grp['Max Drawdown [%]'].astype(float)
+            _g = _test.groupby(level=_pair_params3, sort=False)
+            _sr_agg = _g['Sharpe Ratio'].agg(
+                sharpe_mean='mean', sharpe_median='median', _sr_std='std',
+                pct_fenetres_positives=lambda s: (s > 0).mean() * 100,
+            )
+            _ret_agg = _g['Total Return [%]'].agg(_ret_mean='mean', _ret_std='std')
+            _dd_mean = _g['Max Drawdown [%]'].mean().rename('dd_med_%')
 
-            _sr_mean = float(_sr.mean())
-            _sr_std = float(_sr.std())
-            _cv_sr = abs(_sr_std / _sr_mean) if _sr_mean != 0 else np.inf
-            _pct_pos = float((_sr > 0).mean() * 100)
-            _ret_mean = float(_ret.mean())
-            _ret_cv = abs(float(_ret.std()) / _ret_mean) if _ret_mean != 0 else np.inf
+            _pair_df = pd.concat([_sr_agg, _ret_agg, _dd_mean], axis=1)
 
-            # Médiane de Max Drawdown Duration (en jours)
-            _dd_dur_med = np.nan
-            if 'Max Drawdown Duration' in _grp.columns:
-                try:
-                    _dd_dur_med = float(
-                        pd.to_timedelta(_grp['Max Drawdown Duration'].dropna())
-                        .dt.total_seconds().median() / 86400
-                    )
-                except Exception:
-                    pass
+            if 'Max Drawdown Duration' in _test.columns:
+                _dur = pd.to_timedelta(_test['Max Drawdown Duration'], errors='coerce')
+                _dd_dur_med = (_dur.dt.total_seconds() / 86400).groupby(level=_pair_params3, sort=False).median().rename('dd_dur_med_j')
+                _pair_df = _pair_df.join(_dd_dur_med, how='left')
+            else:
+                _pair_df['dd_dur_med_j'] = np.nan
 
-            _score = float(_scores.loc[_combo]) if _combo in _scores.index else np.nan
-            _params = fmt_params(dict(zip(_pair_params3, _combo if isinstance(_combo, tuple) else [_combo])))
+            _pair_df['sharpe_cv'] = (_pair_df['_sr_std'] / _pair_df['sharpe_mean']).abs().replace([np.inf, -np.inf], np.inf)
+            _pair_df['return_cv'] = (_pair_df['_ret_std'] / _pair_df['_ret_mean']).abs().replace([np.inf, -np.inf], np.inf)
+            _pair_df = _pair_df.rename(columns={'_ret_mean': 'return_med_%'}).drop(columns=['_sr_std', '_ret_std'])
 
-            _rows.append({
-                'paire': _pair,
-                **_params,
-                'score': round(_score, 3),
-                'sharpe_med': round(_sr_mean, 3),
-                'sharpe_cv': round(_cv_sr, 3),
-                'return_med_%': round(_ret_mean, 2),
-                'return_cv': round(_ret_cv, 3),
-                'dd_med_%': round(float(_dd.mean()), 2),
-                'dd_dur_med_j': round(_dd_dur_med, 1) if not np.isnan(_dd_dur_med) else np.nan,
-                'pct_fenetres_positives': round(_pct_pos, 1),
-            })
+            # Keep only valid combos
+            if len(_vcs) < len(_pair_df):
+                _pair_df = _pair_df.loc[_pair_df.index.intersection(_vcs)]
 
-    mo.stop(not _rows, mo.vstack([
+            # Join score
+            if len(_scores) > 0:
+                _pair_df = _pair_df.join(_scores.rename('score'), how='left')
+            else:
+                _pair_df['score'] = np.nan
+
+            _pair_df = _pair_df.reset_index()
+            _pair_df.insert(0, 'paire', _pair)
+            _frames.append(_pair_df)
+
+    mo.stop(not _frames, mo.vstack([
         mo.md("## 3. Stabilité inter-fenêtres"),
         mo.callout(mo.md("Aucune combo valide — ajuste les critères."), kind="warn"),
     ]))
-    stability_df = pd.DataFrame(_rows).sort_values(['pct_fenetres_positives', 'sharpe_cv'], ascending=[False, True])
+    stability_df = pd.concat(_frames, ignore_index=True)
+    # Formatage ma_window en int, autres paramètres arrondis
+    for _p in detected_params:
+        if _p in stability_df.columns:
+            if _p == 'ma_window':
+                stability_df[_p] = stability_df[_p].round().astype('Int64')
+            else:
+                stability_df[_p] = stability_df[_p].round(4)
+    # Arrondis des métriques
+    for _c, _d in [('score', 3), ('sharpe_mean', 3), ('sharpe_median', 3), ('sharpe_cv', 3),
+                   ('return_med_%', 2), ('return_cv', 3), ('dd_med_%', 2),
+                   ('dd_dur_med_j', 1), ('pct_fenetres_positives', 1)]:
+        if _c in stability_df.columns:
+            stability_df[_c] = stability_df[_c].round(_d)
+    # Ordre des colonnes pour l'affichage
+    _ordered = ['paire'] + [p for p in detected_params if p in stability_df.columns] + \
+               [c for c in ['score', 'sharpe_mean', 'sharpe_median', 'sharpe_cv',
+                            'return_med_%', 'return_cv', 'dd_med_%', 'dd_dur_med_j',
+                            'pct_fenetres_positives'] if c in stability_df.columns]
+    stability_df = stability_df[_ordered]
+    stability_df = stability_df.sort_values(['pct_fenetres_positives', 'sharpe_cv'], ascending=[False, True])
     mo.output.replace(mo.vstack([
         mo.md("## 3. Stabilité inter-fenêtres"),
         mo.md("_Triées par : % fenêtres positives ↓, CV Sharpe ↑ (plus bas = plus stable)_"),
@@ -573,7 +593,14 @@ def _section5(compute_dsr, detected_params, mo, np, pairs, pd, test_data):
 
 
 @app.cell
-def _section_best_params(detected_params, mo, pd, plateau_df, stability_df):
+def _section_best_params(
+    detected_params,
+    mo,
+    pd,
+    plateau_df,
+    plateau_only,
+    stability_df,
+):
     best_params_table = None
 
     _has_data = (
@@ -596,12 +623,12 @@ def _section_best_params(detected_params, mo, pd, plateau_df, stability_df):
         _stab = _round_params(stability_df)
         _plat = _round_params(plateau_df)
 
-        _stab_cols = [c for c in _merge_cols + ['score', 'sharpe_med', 'sharpe_cv', 'return_med_%', 'dd_med_%', 'dd_dur_med_j', 'pct_fenetres_positives'] if c in _stab.columns]
+        _stab_cols = [c for c in _merge_cols + ['score', 'sharpe_mean', 'sharpe_median', 'sharpe_cv', 'return_med_%', 'dd_med_%', 'dd_dur_med_j', 'pct_fenetres_positives'] if c in _stab.columns]
         _plat_cols = [c for c in _merge_cols + ['ratio_combo/voisins', 'type'] if c in _plat.columns]
 
         _merged = pd.merge(_stab[_stab_cols], _plat[_plat_cols], on=_merge_cols, how='inner')
 
-        if 'type' in _merged.columns:
+        if 'type' in _merged.columns and plateau_only.value:
             _plateaux = _merged[_merged['type'] == 'plateau'].copy()
             if len(_plateaux) == 0:
                 _plateaux = _merged.copy()
@@ -618,8 +645,8 @@ def _section_best_params(detected_params, mo, pd, plateau_df, stability_df):
             _score = pd.Series(0.0, index=_plateaux.index)
             if 'pct_fenetres_positives' in _plateaux.columns:
                 _score += _norm(_plateaux['pct_fenetres_positives']) * 2
-            if 'sharpe_med' in _plateaux.columns:
-                _score += _norm(_plateaux['sharpe_med'].clip(upper=_plateaux['sharpe_med'].quantile(0.95))) * 2
+            if 'sharpe_median' in _plateaux.columns:
+                _score += _norm(_plateaux['sharpe_median'].clip(upper=_plateaux['sharpe_median'].quantile(0.95))) * 2
             if 'return_med_%' in _plateaux.columns:
                 _score += _norm(_plateaux['return_med_%'])
             if 'dd_med_%' in _plateaux.columns:
@@ -632,7 +659,7 @@ def _section_best_params(detected_params, mo, pd, plateau_df, stability_df):
             _plateaux = _plateaux.copy()
             _plateaux['rec_score'] = (_score / 7).round(3)
 
-            _display_cols = [c for c in ['paire'] + detected_params + ['rec_score', 'sharpe_med', 'return_med_%', 'dd_med_%', 'dd_dur_med_j', 'pct_fenetres_positives', 'ratio_combo/voisins'] if c in _plateaux.columns]
+            _display_cols = [c for c in ['paire'] + detected_params + ['rec_score', 'sharpe_mean', 'sharpe_median', 'return_med_%', 'dd_med_%', 'dd_dur_med_j', 'pct_fenetres_positives', 'ratio_combo/voisins'] if c in _plateaux.columns]
             _best = _plateaux.sort_values('rec_score', ascending=False).head(30)[_display_cols].reset_index(drop=True)
 
             best_params_table = mo.ui.table(_best, selection='single')
@@ -643,6 +670,83 @@ def _section_best_params(detected_params, mo, pd, plateau_df, stability_df):
                 best_params_table,
             ]))
     return (best_params_table,)
+
+
+@app.cell
+def _section6bis_top_per_pair(
+    all_data,
+    detected_params,
+    min_total_trades,
+    mo,
+    pairs,
+    pd,
+    stability_df,
+    top_n_per_pair,
+):
+    top_by_pair_table = None
+    if stability_df is None or len(stability_df) == 0:
+        mo.output.replace(mo.callout(mo.md("Pas de données."), kind="neutral"))
+    else:
+        _n = int(top_n_per_pair.value)
+        _min_tt = int(min_total_trades.value)
+        _df6b = stability_df.copy()
+
+        # Total trades par (paire, params) = somme train+test sur toutes les fenêtres
+        _tt_frames = []
+        for _pair in pairs:
+            _df_all = all_data.get(_pair)
+            if _df_all is None or 'Total Trades' not in _df_all.columns:
+                continue
+            _pp = [p for p in detected_params if p in _df_all.index.names]
+            if not _pp:
+                continue
+            _tt = _df_all.groupby(level=_pp)['Total Trades'].sum().reset_index()
+            _tt.insert(0, 'paire', _pair)
+            _tt_frames.append(_tt)
+
+        _dropped_tt = 0
+        if _tt_frames:
+            _tt_df = pd.concat(_tt_frames, ignore_index=True).rename(columns={'Total Trades': 'total_trades'})
+            for _p in detected_params:
+                if _p in _tt_df.columns:
+                    if _p == 'ma_window':
+                        _tt_df[_p] = _tt_df[_p].round().astype('Int64')
+                    else:
+                        _tt_df[_p] = _tt_df[_p].round(4)
+            _merge_on = ['paire'] + [p for p in detected_params if p in _df6b.columns and p in _tt_df.columns]
+            _df6b = _df6b.merge(_tt_df[_merge_on + ['total_trades']], on=_merge_on, how='left')
+            if _min_tt > 0:
+                _before_tt = len(_df6b)
+                _df6b = _df6b[_df6b['total_trades'].fillna(0) >= _min_tt]
+                _dropped_tt = _before_tt - len(_df6b)
+
+        _dropped = 0
+        if 'env_pct' in _df6b.columns and 'sl_pct' in _df6b.columns:
+            _before = len(_df6b)
+            _df6b = _df6b[_df6b['env_pct'] < _df6b['sl_pct']]
+            _dropped = _before - len(_df6b)
+        _top_by_pair = (
+            _df6b
+            .sort_values(['paire', 'sharpe_median'], ascending=[True, False])
+            .groupby('paire', as_index=False)
+            .head(_n)
+            .sort_values('sharpe_median', ascending=False)
+            .reset_index(drop=True)
+        )
+        _cols = [c for c in ['paire'] + detected_params + ['sharpe_median', 'sharpe_mean', 'sharpe_cv', 'return_med_%', 'dd_med_%', 'dd_dur_med_j', 'pct_fenetres_positives', 'total_trades', 'score'] if c in _top_by_pair.columns]
+        top_by_pair_table = mo.ui.table(_top_by_pair[_cols], selection='single', page_size=50)
+        _notes = []
+        if _dropped_tt:
+            _notes.append(f"{_dropped_tt} combos total_trades<{_min_tt} exclus")
+        if _dropped:
+            _notes.append(f"{_dropped} combos env≥sl exclus")
+        _note = (" · " + " · ".join(_notes)) if _notes else ""
+        mo.output.replace(mo.vstack([
+            mo.md(f"## 6bis. Top {_n} combos par paire"),
+            mo.md(f"_Toutes les paires · top {_n} combos/paire triés par sharpe_median ↓ · classement global par sharpe_median ↓{_note} · clique sur une ligne pour pré-remplir le backtest_"),
+            top_by_pair_table,
+        ]))
+    return (top_by_pair_table,)
 
 
 @app.cell
@@ -750,11 +854,22 @@ def _section6_heatmaps(
 
 
 @app.cell
-def _section7_main_controls(best_params_table, detected_strategy, mo, pairs):
-    # Auto-fill paire depuis la sélection dans la table best_params
+def _section7_main_controls(
+    best_params_table,
+    detected_strategy,
+    mo,
+    pairs,
+    top_by_pair_table,
+):
+    # Auto-fill paire depuis la sélection dans §6bis (priorité) ou §6
     _default_pair = pairs[0] if pairs else None
-    if best_params_table is not None and len(best_params_table.value) > 0:
-        _sel_pair = best_params_table.value.iloc[0].get('paire')
+    _sel_row = None
+    if top_by_pair_table is not None and len(top_by_pair_table.value) > 0:
+        _sel_row = top_by_pair_table.value.iloc[0]
+    elif best_params_table is not None and len(best_params_table.value) > 0:
+        _sel_row = best_params_table.value.iloc[0]
+    if _sel_row is not None:
+        _sel_pair = _sel_row.get('paire')
         if _sel_pair and _sel_pair in pairs:
             _default_pair = _sel_pair
 
@@ -785,9 +900,10 @@ def _section7_param_controls(
     np,
     pairs,
     pd,
+    top_by_pair_table,
     valid_combos,
 ):
-    """Contrôles de paramètres — se re-run quand best_params_table change (auto-fill)."""
+    """Contrôles de paramètres — se re-run quand §6bis ou §6 change (auto-fill)."""
     # Meilleure combo valide par défaut
     _best_pair  = pairs[0] if pairs else None
     _best_combo = None
@@ -804,13 +920,16 @@ def _section7_param_controls(
 
     _def = dict(zip(detected_params, _best_combo if isinstance(_best_combo, tuple) else ([_best_combo] if _best_combo else [])))
 
-    # Override prioritaire : sélection dans le tableau best_params
-    if best_params_table is not None and len(best_params_table.value) > 0:
+    # Override prioritaire : §6bis en premier, puis §6, puis heatmap
+    _row = None
+    if top_by_pair_table is not None and len(top_by_pair_table.value) > 0:
+        _row = top_by_pair_table.value.iloc[0].to_dict()
+    elif best_params_table is not None and len(best_params_table.value) > 0:
         _row = best_params_table.value.iloc[0].to_dict()
+    if _row is not None:
         for _param in detected_params:
             if _param in _row:
                 _def[_param] = _row[_param]
-    # Sinon override depuis le clic heatmap
     elif heatmap_click is not None and heatmap_click.value:
         try:
             _pts = heatmap_click.value.get('points', [])
@@ -820,7 +939,7 @@ def _section7_param_controls(
         except Exception:
             pass
 
-    bt_ma   = mo.ui.number(value=int(_def.get('ma_window', 20)), start=5, stop=500, step=1, label='ma_window')
+    bt_ma   = mo.ui.number(value=int(_def.get('ma_window', 20)), start=1, stop=500, step=1, label='ma_window')
     bt_env  = mo.ui.number(value=float(_def.get('env_pct', 0.03)), start=0.005, stop=0.30, step=0.005, label='env_pct (RAM)')
     bt_sl   = mo.ui.number(value=float(_def.get('sl_pct', _def.get('sl_stop', 0.05))), start=0.005, stop=0.30, step=0.005, label='sl_pct / sl_stop')
     _rsi_names = {0: '0 (off)', 1: '1 (RSI60 40-60)', 2: '2 (RSI80 42-58)', 3: '3 (RSI120 42-58)'}
@@ -840,12 +959,12 @@ def _section7_param_controls(
 def _section7_backtest(
     bt_atrm,
     bt_atrw,
-    bt_rsi,
     bt_capital,
     bt_env,
     bt_fees,
     bt_ma,
     bt_pair,
+    bt_rsi,
     bt_sl,
     detected_strategy,
     file_info,

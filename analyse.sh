@@ -20,9 +20,12 @@ echo "│  4) Optimisation RAM DCA (opti_ram.py)  │"
 echo "│  5) RAM DCA — HYPE Lighter (marimo)     │"
 echo "│  6) Analyse (ancienne version)          │"
 echo "│  7) Evaluate ML signals (backtest OOS)  │"
+echo "│  8) AlphaSearchV2 — MEANREV_042x        │"
+echo "│  9) AlphaSearchV2 — 042_2 Full Grid    │"
+echo "│ 10) AlphaSearchV2 — 042_3 Full (limit)  │"
 echo "└─────────────────────────────────────────┘"
 echo ""
-read -p "  Choix [1-7] : " CHOICE
+read -p "  Choix [1-10] : " CHOICE
 
 case "$CHOICE" in
     1) MODE="analyse"   ;;
@@ -32,6 +35,9 @@ case "$CHOICE" in
     5) MODE="ram"       ;;
     6) MODE="old"       ;;
     7) MODE="evaluate"  ;;
+    8) MODE="alpha042"  ;;
+    9) MODE="alpha042v2";;
+    10) MODE="alpha042v3";;
     *) echo "Choix invalide. Lancement de l'analyse par défaut."
        MODE="analyse"   ;;
 esac
@@ -64,6 +70,12 @@ elif [ "$MODE" = "ram" ]; then
     NB="notebooks/ram_dca_lighter.py"
 elif [ "$MODE" = "evaluate" ]; then
     NB="notebooks/evaluate.py"
+elif [ "$MODE" = "alpha042" ]; then
+    NB="/home/devbox/AlphaSearchV2/analyse_042x.py"
+elif [ "$MODE" = "alpha042v2" ]; then
+    NB="/home/devbox/AlphaSearchV2/analyse_042_v2.py"
+elif [ "$MODE" = "alpha042v3" ]; then
+    NB="/home/devbox/AlphaSearchV2/analyse_042_v3.py"
 else
     NB="notebooks/analyse_full.py"
 fi
@@ -71,8 +83,14 @@ fi
 # ── 1. Lancer marimo ─────────────────────────────────────────────────────────
 export MARIMO_OUTPUT_MAX_BYTES=200000000
 echo ""
-echo "Démarrage de marimo → $NB"
-.venv/bin/marimo edit "$NB" --host 0.0.0.0 --port $PORT --headless --no-token &
+if [ "$MODE" = "alpha042v2" ] || [ "$MODE" = "alpha042v3" ]; then
+    MARIMO_CMD="run"
+    echo "Démarrage de marimo (mode présentation) → $NB"
+else
+    MARIMO_CMD="edit"
+    echo "Démarrage de marimo → $NB"
+fi
+.venv/bin/marimo $MARIMO_CMD "$NB" --host 0.0.0.0 --port $PORT --headless --no-token &
 MARIMO_PID=$!
 
 # ── 2. Attendre que le serveur HTTP réponde (max 60s) ────────────────────────
@@ -89,40 +107,17 @@ if ! curl -sf "http://localhost:$PORT" -o /dev/null 2>/dev/null; then
     exit 1
 fi
 
-# ── 3. Lancer cloudflared ────────────────────────────────────────────────────
-LOGFILE=$(mktemp /tmp/cloudflared.XXXXXX.log)
-cloudflared tunnel --url http://localhost:$PORT > "$LOGFILE" 2>&1 &
-CF_PID=$!
+# ── 3. URL Tailscale (direct, pas de tunnel) ─────────────────────────────────
+TAILSCALE_IP="__REDACTED_IP__"
+TAILSCALE_URL="http://$TAILSCALE_IP:$PORT"
 
-# ── 4. Attendre l'URL (max 30s) ──────────────────────────────────────────────
-URL=""
-for i in $(seq 1 30); do
-    URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' "$LOGFILE" 2>/dev/null | head -1)
-    [ -n "$URL" ] && break
-    sleep 1
-done
+echo ""
+echo "┌──────────────────────────────────────────────────────────┐"
+echo "│  $NB"
+echo "│  Tailscale : $TAILSCALE_URL"
+echo "│  Local     : http://localhost:$PORT"
+echo "└──────────────────────────────────────────────────────────┘"
+echo ""
 
-if [ -z "$URL" ]; then
-    echo "Timeout: URL Cloudflare non trouvée. Accès local : http://localhost:$PORT"
-else
-    echo "Vérification du tunnel..."
-    for i in $(seq 1 20); do
-        if curl -sf --max-time 3 "$URL" -o /dev/null 2>/dev/null; then
-            break
-        fi
-        sleep 1
-    done
-    echo ""
-    echo "┌──────────────────────────────────────────────────────────┐"
-    echo "│  $NB"
-    echo "│  Lien : $URL"
-    echo "└──────────────────────────────────────────────────────────┘"
-    echo ""
-fi
-
-# ── 5. Attendre Ctrl+C ───────────────────────────────────────────────────────
+# ── 4. Attendre Ctrl+C ───────────────────────────────────────────────────────
 wait $MARIMO_PID
-
-# Cleanup
-kill $CF_PID 2>/dev/null
-rm -f "$LOGFILE"

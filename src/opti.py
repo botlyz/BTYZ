@@ -280,7 +280,14 @@ def process_chunk(pair, chunk_idx, sub_grid, strategy, exchange, tf, cache_dir):
             ),
         )
 
-        param_grid = {k: _vbt.Param(v) for k, v in sub_grid.items()}
+        # Skip les combos illogiques env_pct >= sl_pct (RAM/mean reversion)
+        _has_env_sl = 'env_pct' in sub_grid and 'sl_pct' in sub_grid
+        param_grid = {}
+        for k, v in sub_grid.items():
+            if _has_env_sl and k == 'sl_pct':
+                param_grid[k] = _vbt.Param(v, condition='sl_pct > env_pct')
+            else:
+                param_grid[k] = _vbt.Param(v)
         chunk_results = cv_fn(_data, **param_grid)
 
         _vbt.save(chunk_results, _chunk_pickle)
