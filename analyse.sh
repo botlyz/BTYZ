@@ -14,33 +14,33 @@ echo ""
 echo "┌─────────────────────────────────────────┐"
 echo "│              BTYZ Launcher              │"
 echo "├─────────────────────────────────────────┤"
-echo "│  1) Analyse (walk-forward results)      │"
-echo "│  2) CVD Explorer                        │"
-echo "│  3) Optimisation Keltner (opti.py)      │"
-echo "│  4) Optimisation RAM DCA (opti_ram.py)  │"
-echo "│  5) RAM DCA — HYPE Lighter (marimo)     │"
-echo "│  6) Analyse (ancienne version)          │"
-echo "│  7) Evaluate ML signals (backtest OOS)  │"
-echo "│  8) BTYZ Engine — Visualisation WFA     │"
-echo "│  9) BTYZ Engine — Visualisation MCCV    │"
-echo "│ 10) BTYZ Engine — WFA Tuning comparator │"
+echo "│  1) BTYZ Engine — Visualisation WFA     │"
+echo "│  2) BTYZ Engine — Visualisation MCCV    │"
+echo "│  3) BTYZ Engine — WFA Tuning comparator │"
+echo "│  4) Optimisation Keltner (opti.py)      │"
+echo "│  5) Optimisation RAM DCA (opti_ram.py)  │"
+echo "│  6) RAM DCA — HYPE Lighter (marimo)     │"
+echo "│  7) CVD Explorer                        │"
+echo "│  8) Evaluate ML signals (backtest OOS)  │"
+echo "│  9) Analyse (ancienne version pickle)   │"
+echo "│ 10) Analyse (legacy)                    │"
 echo "└─────────────────────────────────────────┘"
 echo ""
 read -p "  Choix [1-10] : " CHOICE
 
 case "$CHOICE" in
-    1) MODE="analyse"   ;;
-    2) MODE="cvd"       ;;
-    3) MODE="opti"      ;;
-    4) MODE="opti_ram"  ;;
-    5) MODE="ram"       ;;
-    6) MODE="old"       ;;
-    7) MODE="evaluate"  ;;
-    8) MODE="engine_wfa"   ;;
-    9) MODE="engine_mccv"  ;;
-    10) MODE="engine_tuning";;
-    *) echo "Choix invalide. Lancement de l'analyse par défaut."
-       MODE="analyse"   ;;
+    1) MODE="engine_wfa"   ;;
+    2) MODE="engine_mccv"  ;;
+    3) MODE="engine_tuning";;
+    4) MODE="opti"      ;;
+    5) MODE="opti_ram"  ;;
+    6) MODE="ram"       ;;
+    7) MODE="cvd"       ;;
+    8) MODE="evaluate"  ;;
+    9) MODE="analyse"   ;;
+    10) MODE="old"      ;;
+    *) echo "Choix invalide. Lancement de la visualisation WFA par défaut."
+       MODE="engine_wfa"   ;;
 esac
 
 # ── Mode opti : pas de marimo ────────────────────────────────────────────────
@@ -77,8 +77,10 @@ elif [ "$MODE" = "engine_mccv" ]; then
     NB="notebooks/analyse/analyse_mccv.py"
 elif [ "$MODE" = "engine_tuning" ]; then
     NB="notebooks/analyse/analyse_wfa_tuning.py"
-else
+elif [ "$MODE" = "analyse" ]; then
     NB="notebooks/analyse_full.py"
+else
+    NB="notebooks/analyse/analyse_engine.py"
 fi
 
 # ── 1. Lancer marimo ─────────────────────────────────────────────────────────

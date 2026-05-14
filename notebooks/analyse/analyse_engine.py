@@ -190,7 +190,7 @@ def _build_cross_run(RESULTS_ROOT, json, load_liquidity_map, np, pd):
                         _d = json.loads(_sj.read_text())
                     except Exception:
                         continue
-                    _ts, _rets, _dds, _ddurs, _pfs, _wrs = [], [], [], [], [], []
+                    _ts, _rets, _dds, _ddurs, _pfs, _wrs, _trs = [], [], [], [], [], [], []
                     for _fr in _d.get("folds", []):
                         _tm = _fr.get("test_metrics", {}) or {}
                         for _arr, _key in (
@@ -206,6 +206,14 @@ def _build_cross_run(RESULTS_ROOT, json, load_liquidity_map, np, pd):
                                 _arr.append(_v)
                             except (TypeError, ValueError):
                                 pass
+                        # trades : prend total_trades sinon trades_count
+                        try:
+                            _vtr = _tm.get("total_trades")
+                            if _vtr is None:
+                                _vtr = _tm.get("trades_count")
+                            _trs.append(float(_vtr or 0))
+                        except (TypeError, ValueError):
+                            pass
                     if not _ts:
                         continue
                     rows.append({
@@ -219,10 +227,14 @@ def _build_cross_run(RESULTS_ROOT, json, load_liquidity_map, np, pd):
                         "n_folds": len(_d.get("folds", [])),
                         "mean_sharpe": round(float(np.mean(_ts)), 2),
                         "median_sharpe": round(float(np.median(_ts)), 2),
+                        "std_sharpe": round(float(np.std(_ts)), 2),
                         "pct_positive": round((np.array(_rets) > 0).mean() * 100, 1) if _rets else 0.0,
                         "mean_ret_pct": round(float(np.mean(_rets)), 2) if _rets else 0.0,
                         "mean_dd_pct": round(float(np.mean(_dds)), 2) if _dds else 0.0,
                         "mean_dd_dur_days": round(float(np.mean(_ddurs)), 2) if _ddurs else 0.0,
+                        "mean_trades": round(float(np.mean(_trs)), 1) if _trs else 0.0,
+                        "median_trades": round(float(np.median(_trs)), 1) if _trs else 0.0,
+                        "std_trades": round(float(np.std(_trs)), 1) if _trs else 0.0,
                         "mean_pf": round(float(np.mean(_pfs)), 2) if _pfs else 0.0,
                         "mean_wr": round(float(np.mean(_wrs)), 2) if _wrs else 0.0,
                     })
@@ -258,12 +270,17 @@ def _filters_ui(cross_run_df, mo):
     f_min_pos = mo.ui.slider(
         start=0, stop=100, step=5, value=0, label="Min % positive folds",
     )
+    _max_folds = int(cross_run_df["n_folds"].max()) if "n_folds" in cross_run_df.columns else 20
+    f_min_folds = mo.ui.slider(
+        start=1, stop=max(_max_folds, 1), step=1, value=1,
+        label="Min folds", show_value=True,
+    )
     mo.output.replace(mo.vstack([
         mo.md("### §0 Filtres"),
         mo.hstack([f_approach, f_bps, f_liq], justify="start", gap=2),
-        mo.hstack([f_min_sharpe, f_min_pos], justify="start", gap=2),
+        mo.hstack([f_min_sharpe, f_min_pos, f_min_folds], justify="start", gap=2),
     ]))
-    return f_approach, f_bps, f_liq, f_min_pos, f_min_sharpe
+    return f_approach, f_bps, f_liq, f_min_folds, f_min_pos, f_min_sharpe
 
 
 @app.cell
@@ -277,6 +294,7 @@ def _filtered_table(
     f_approach,
     f_bps,
     f_liq,
+    f_min_folds,
     f_min_pos,
     f_min_sharpe,
     mo,
@@ -291,6 +309,7 @@ def _filtered_table(
         _df = _df[_df["liquidity"].isin(f_liq.value)]
     _df = _df[_df["mean_sharpe"] >= f_min_sharpe.value]
     _df = _df[_df["pct_positive"] >= f_min_pos.value]
+    _df = _df[_df["n_folds"] >= f_min_folds.value]
     _df = _df.reset_index(drop=True)
 
     if _df.empty:
@@ -467,11 +486,20 @@ def _section4_controls(mo):
         label="Levier (multiplie la taille des positions)",
         show_value=True,
     )
+    # Position size en % du capital — utilisé pour les stratégies à taille fixe
+    # (RAM_DCA_RSI_v1) en remplaçant l'alloc hardcodée (10% par défaut).
+    # Ignoré silencieusement pour les stratégies à allocations dynamiques (RAM_DCA_v1).
+    size_pct_slider = mo.ui.slider(
+        start=5, stop=100, step=5, value=10,
+        label="Position size % (override alloc fixe — ignoré si la strat utilise allocations dynamiques)",
+        show_value=True,
+    )
     mo.output.replace(mo.vstack([
         mo.md("### §4 — Contrôles"),
         leverage_slider,
+        size_pct_slider,
     ]))
-    return (leverage_slider,)
+    return leverage_slider, size_pct_slider
 
 
 @app.cell
@@ -487,6 +515,7 @@ def _section4_vbt_wf(
     parse_tf_bps,
     pd,
     run_cfg,
+    size_pct_slider,
 ):
     import sys as _sys
     _sys.path.insert(0, "/home/devbox/BTYZ/src")
@@ -568,8 +597,16 @@ def _section4_vbt_wf(
             with _w.catch_warnings():
                 _w.simplefilter("ignore")
                 _lev = float(leverage_slider.value)
-                # Scale TargetPercent size by leverage so it actually leverages
-                _size_lev = _size_s * _lev
+                # Si la stratégie expose ALLOC_FIXED (ex: RAM_DCA_RSI_v1), on
+                # surcharge la taille avec le slider. Pour les strats à
+                # allocations dynamiques (RAM_DCA_v1), on laisse les sizes
+                # natives et le slider est ignoré (scale=1.0).
+                _alloc_fixed = getattr(_mod, "ALLOC_FIXED", None) if _mod else None
+                if _alloc_fixed and _alloc_fixed > 0:
+                    _size_scale = (float(size_pct_slider.value) / 100.0) / float(_alloc_fixed)
+                else:
+                    _size_scale = 1.0
+                _size_lev = _size_s * _lev * _size_scale
                 _pf = vbt.Portfolio.from_orders(
                     close=_ohlcv_full["close"],
                     size=_size_lev,
