@@ -123,8 +123,25 @@ def _ram_single_env_nb(high, low, close, ma, upper_env, lower_env,
             else:
                 continue
 
-        # Exit : retour à la MA (TP)
+        # Gestion position en cours : SL prioritaire sur TP
         if pos_dir != 0:
+            # Check SL d'abord (perte → cut)
+            if pos_dir == 1:
+                sl_level_cur = avg_entry * (1.0 - sl_pct)
+                sl_hit_cur   = low[i] <= sl_level_cur
+            else:
+                sl_level_cur = avg_entry * (1.0 + sl_pct)
+                sl_hit_cur   = high[i] >= sl_level_cur
+
+            if sl_hit_cur:
+                target_size[i] = 0.0
+                exec_price[i]  = sl_level_cur
+                pos_dir     = 0
+                avg_entry   = 0.0
+                sl_cooldown = True
+                continue
+
+            # Sinon check TP (retour à la MA)
             exit_hit = (pos_dir == 1 and high[i] >= ma_prev) or \
                        (pos_dir == -1 and low[i] <= ma_prev)
             if exit_hit:
@@ -134,12 +151,11 @@ def _ram_single_env_nb(high, low, close, ma, upper_env, lower_env,
                 avg_entry = 0.0
                 continue
 
-        # Filtre RSI : pas de nouvelle entrée si can_trade=False
-        if not can_trade[i]:
+            # En position et ni SL ni TP → on attend
             continue
 
-        # Pas de nouvelle entrée si déjà en position (single env = pas de DCA)
-        if pos_dir != 0:
+        # Filtre RSI : pas de nouvelle entrée si can_trade=False
+        if not can_trade[i]:
             continue
 
         # Détection entrée — long si touche bande basse, short si touche bande haute
