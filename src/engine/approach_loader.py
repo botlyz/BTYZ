@@ -59,7 +59,11 @@ def load_strategy_module(approach_id: str):
         raise ImportError(f"Cannot load spec for {mod_path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(mod_name, None)
+        raise
     return module
 
 

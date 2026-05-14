@@ -176,7 +176,12 @@ def _build_cross_run(RESULTS_ROOT, json, load_liquidity_map, np, pd):
                     continue
                 _parts = _run.name.split("_")
                 _tf = _parts[0] if _parts else "?"
-                _bps_str = _parts[-1] if len(_parts) > 1 else "?bps"
+                # bps = segment qui contient "bps" (peut ne pas être en dernier
+                # depuis qu'on suffixe le tag avec le découpage walk-forward)
+                _bps_str = next((p for p in _parts if "bps" in p), "?bps")
+                # wfa tag = segment matchant le pattern <int>d<int>d<int>d
+                import re as _re
+                _wfa = next((p for p in _parts if _re.fullmatch(r"\d+d\d+d\d+d", p)), "")
                 for _pair in sorted(_run.iterdir()):
                     _sj = _pair / "summary.json"
                     if not _sj.exists():
@@ -208,6 +213,7 @@ def _build_cross_run(RESULTS_ROOT, json, load_liquidity_map, np, pd):
                         "run": _run.name,
                         "tf": _tf,
                         "bps": _bps_str,
+                        "wfa": _wfa,
                         "pair": _pair.name,
                         "liquidity": liq_map.get(_pair.name, "unknown"),
                         "n_folds": len(_d.get("folds", [])),
@@ -258,6 +264,11 @@ def _filters_ui(cross_run_df, mo):
         mo.hstack([f_min_sharpe, f_min_pos], justify="start", gap=2),
     ]))
     return f_approach, f_bps, f_liq, f_min_pos, f_min_sharpe
+
+
+@app.cell
+def _():
+    return
 
 
 @app.cell
@@ -450,12 +461,28 @@ def _section3_wfe(folds_df, go, mo, pair):
 
 
 @app.cell
+def _section4_controls(mo):
+    leverage_slider = mo.ui.slider(
+        start=1.0, stop=10.0, step=0.5, value=1.0,
+        label="Levier (multiplie la taille des positions)",
+        show_value=True,
+    )
+    mo.output.replace(mo.vstack([
+        mo.md("### §4 — Contrôles"),
+        leverage_slider,
+    ]))
+    return (leverage_slider,)
+
+
+@app.cell
 def _section4_vbt_wf(
     approach_id,
     folds_df,
     go,
+    leverage_slider,
     load_ohlcv,
     mo,
+    np,
     pair,
     parse_tf_bps,
     pd,
@@ -466,21 +493,23 @@ def _section4_vbt_wf(
     import warnings as _w
     _w.filterwarnings("ignore")
 
+    import vectorbtpro as vbt
+
     _tf_str, _bps = parse_tf_bps(run_cfg)
     _fees = _bps * 1e-4
+    _slippage = 0.0002
 
     _ohlcv_full = load_ohlcv(pair, _tf_str)
     if _ohlcv_full is None:
         mo.output.replace(mo.callout(
-            mo.md(f"OHLCV {pair} introuvable dans `data/raw/lighter/1m/`."), kind="warn"
+            mo.md(f"OHLCV {pair} introuvable dans `data/raw/lighter/1m/`."),
+            kind="warn",
         ))
     else:
-        _equity_pieces = []
-        _fold_starts = []
-        _fold_returns = []
-        _n_trades_total = 0
-        _capital = 10_000.0
         _error = None
+        _pf = None
+        _fold_starts = []
+        _n_folds_used = 0
         try:
             from engine.approach_loader import instantiate_strategy
             _strat = instantiate_strategy(approach_id)
@@ -490,6 +519,11 @@ def _section4_vbt_wf(
                     _mod._target_fees = _fees
                 if hasattr(_mod, "_target_freq"):
                     _mod._target_freq = _tf_str
+
+            # Build stitched arrays globally — one slot per bar of the full OHLCV
+            _N = len(_ohlcv_full)
+            _g_size = np.full(_N, np.nan)
+            _g_price = np.full(_N, np.nan)
 
             for _fr in sorted(folds_df.to_dict(orient="records"),
                               key=lambda r: r["fold"]):
@@ -502,6 +536,8 @@ def _section4_vbt_wf(
 
                 _si = int(_ohlcv_full.index.searchsorted(_test_start))
                 _te = int(_ohlcv_full.index.searchsorted(_test_end, side="right"))
+                if _te <= _si:
+                    continue
                 _wi = max(0, _si - 300)
                 _slc = _ohlcv_full.iloc[_wi:_te]
                 if len(_slc) < 50:
@@ -509,122 +545,223 @@ def _section4_vbt_wf(
 
                 with _w.catch_warnings():
                     _w.simplefilter("ignore")
-                    _pf = _strat.run_backtest(_slc, _params)
-                if _pf is None:
+                    _ts, _ep = _strat.compute_target_arrays(_slc, _params)
+                if _ts is None or _ep is None:
                     continue
 
-                _value_test = _pf.value.loc[_test_start:_test_end]
-                if len(_value_test) < 2:
-                    continue
-                # Rebase: each fold restart from current cumulative capital
-                _fold_growth = _value_test / _value_test.iloc[0]
-                _fold_equity = _fold_growth * _capital
-                _equity_pieces.append(_fold_equity)
-                _fold_starts.append(_value_test.index[0])
-                _capital = float(_fold_equity.iloc[-1])
-                _fold_returns.append(float(_fold_growth.iloc[-1] - 1) * 100)
-                _n_trades_total += int(_pf.trades.count() or 0)
+                _wl = _si - _wi
+                _test_len = _te - _si
+                _g_size[_si:_te] = _ts.values[_wl:_wl + _test_len]
+                _g_price[_si:_te] = _ep.values[_wl:_wl + _test_len]
+                _fold_starts.append(_ohlcv_full.index[_si])
+                _n_folds_used += 1
+
+            if _n_folds_used == 0:
+                raise RuntimeError(
+                    "Aucun fold valide — la stratégie expose-t-elle "
+                    "`compute_target_arrays()` ?"
+                )
+
+            _size_s = pd.Series(_g_size, index=_ohlcv_full.index)
+            _price_s = pd.Series(_g_price, index=_ohlcv_full.index)
+
+            with _w.catch_warnings():
+                _w.simplefilter("ignore")
+                _lev = float(leverage_slider.value)
+                # Scale TargetPercent size by leverage so it actually leverages
+                _size_lev = _size_s * _lev
+                _pf = vbt.Portfolio.from_orders(
+                    close=_ohlcv_full["close"],
+                    size=_size_lev,
+                    price=_price_s,
+                    size_type="TargetPercent",
+                    init_cash=10_000.0,
+                    leverage=_lev,
+                    fees=_fees,
+                    slippage=_slippage,
+                    freq=_tf_str,
+                )
         except Exception as _e:
             _error = str(_e)
 
         if _error is not None:
             mo.output.replace(mo.callout(
-                mo.md(f"VBT replay erreur : `{_error}`"), kind="danger"
+                mo.md(f"VBT replay erreur : `{_error}`"), kind="danger",
             ))
-        elif not _equity_pieces:
-            mo.output.replace(mo.md("## §4 VBT replay WF — _aucun fold valide._"))
+        elif _pf is None:
+            mo.output.replace(mo.md("## §4 VBT replay WF — _portfolio vide._"))
         else:
-            _equity = pd.concat(_equity_pieces).sort_index()
-            _equity = _equity[~_equity.index.duplicated(keep="first")]
-            # Resample 1D pour léger
-            _eq_1d = _equity.resample("1D").last().ffill()
-            _running_max = _eq_1d.cummax()
-            _dd_pct = (_eq_1d / _running_max - 1) * 100
-            _total_ret = (_eq_1d.iloc[-1] / 10_000.0 - 1) * 100
-            _max_dd = float(_dd_pct.min())
-            _max_dd_idx = _dd_pct.idxmin()
-            _dd_dur_days = 0
-            try:
-                _under = _dd_pct < -0.01
-                _runs = (_under != _under.shift()).cumsum()
-                _drawdown_runs = _runs[_under].value_counts().max()
-                _dd_dur_days = int(_drawdown_runs) if pd.notna(_drawdown_runs) else 0
-            except Exception:
-                pass
+            # Restrict to WF window
+            _wf_start = folds_df["test_start"].dropna().iloc[0]
+            _wf_end   = folds_df["test_end"].dropna().iloc[-1]
 
-            _fig_eq = go.Figure()
-            _fig_eq.add_trace(go.Scatter(
-                x=_eq_1d.index, y=_eq_1d.values, mode="lines",
-                name="Equity ($)",
-                line=dict(color="#3498db", width=1.6),
+            with _w.catch_warnings():
+                _w.simplefilter("ignore")
+                _pf_wf = _pf.loc[_wf_start:_wf_end]
+                _stats = _pf_wf.stats()
+            _stats_df = pd.DataFrame({
+                "Métrique": _stats.index.astype(str),
+                "Valeur":   [str(v) for v in _stats.values],
+            })
+
+            # ── Compute per-fold indicators (test slice only) ──
+            # For each fold, compute MA + bands using THAT fold's params.
+            _fold_indicators = []
+            _prev_params = None
+            for _fr in sorted(folds_df.to_dict(orient="records"),
+                              key=lambda r: r["fold"]):
+                _p = {k[2:]: v for k, v in _fr.items() if k.startswith("p_")}
+                _t0 = _fr.get("test_start")
+                _t1 = _fr.get("test_end")
+                if pd.isna(_t0) or pd.isna(_t1):
+                    continue
+                _si = int(_ohlcv_full.index.searchsorted(_t0))
+                _te = int(_ohlcv_full.index.searchsorted(_t1, side="right"))
+                if _te <= _si:
+                    continue
+                _maw = int(_p.get("ma_window", 0) or 0)
+                _wi = max(0, _si - max(_maw, 1))
+                _close = _ohlcv_full["close"].iloc[_wi:_te]
+                _ma_full = (_close.rolling(_maw, min_periods=_maw).mean().values
+                            if _maw > 0 else np.full(len(_close), np.nan))
+                _wl = _si - _wi
+                _ma_test = _ma_full[_wl:_wl + (_te - _si)]
+
+                _envs = _p.get("env_levels")
+                _up_test = np.full_like(_ma_test, np.nan, dtype=float)
+                _lo_test = np.full_like(_ma_test, np.nan, dtype=float)
+                if isinstance(_envs, (list, tuple)) and len(_envs) > 0:
+                    _wid = float(max(_envs))
+                    _up_test = _ma_test * (1.0 + _wid)
+                    _lo_test = _ma_test * (1.0 - _wid)
+                elif "atr_mult" in _p and "atr_window" in _p:
+                    _atrw = int(_p["atr_window"])
+                    _wi2 = max(0, _si - _atrw)
+                    _hh = _ohlcv_full["high"].iloc[_wi2:_te].values
+                    _ll = _ohlcv_full["low"].iloc[_wi2:_te].values
+                    _cc = _ohlcv_full["close"].iloc[_wi2:_te].values
+                    _pc = np.roll(_cc, 1); _pc[0] = _cc[0]
+                    _tr = np.maximum.reduce([
+                        _hh - _ll, np.abs(_hh - _pc), np.abs(_ll - _pc),
+                    ])
+                    _atr = pd.Series(_tr).rolling(_atrw, min_periods=_atrw).mean().values
+                    _wl2 = _si - _wi2
+                    _atr_test = _atr[_wl2:_wl2 + (_te - _si)]
+                    _mult = float(_p["atr_mult"])
+                    _up_test = _ma_test + _mult * _atr_test
+                    _lo_test = _ma_test - _mult * _atr_test
+
+                _fold_indicators.append({
+                    "fold":       int(_fr.get("fold", 0)),
+                    "index":      _ohlcv_full.index[_si:_te],
+                    "ma":         _ma_test,
+                    "range_hi":   _up_test,
+                    "range_lo":   _lo_test,
+                    "params":     _p,
+                    "test_start": _t0,
+                    "params_changed": _prev_params is not None
+                                       and _prev_params != _p,
+                })
+                _prev_params = _p
+
+            # ── VBT plot: pf.loc[wf].resample('1D').plot() ──
+            with _w.catch_warnings():
+                _w.simplefilter("ignore")
+                _pf_wf_ds = _pf_wf.resample("1D")
+                _fig_vbt = _pf_wf_ds.plot()
+
+            # Remove resampled 'Close' trace — replaced by candlesticks
+            _fig_vbt.data = tuple(
+                t for t in _fig_vbt.data
+                if getattr(t, "name", "") != "Close"
+            )
+
+            # Candlestick downsamplé (max ~800 bougies)
+            _ohlcv_wf = _ohlcv_full.loc[_wf_start:_wf_end]
+            _step_c = max(1, len(_ohlcv_wf) // 800)
+            _cslc = _ohlcv_wf.iloc[::_step_c]
+            _fig_vbt.add_trace(go.Candlestick(
+                x=_cslc.index,
+                open=_cslc["open"], high=_cslc["high"],
+                low=_cslc["low"],   close=_cslc["close"],
+                name="OHLCV",
+                increasing_line_color="#2ecc71", decreasing_line_color="#e74c3c",
+                increasing_fillcolor="#2ecc71",  decreasing_fillcolor="#e74c3c",
             ))
-            # Fold boundaries — use shape directly (add_vline + annotation casse sur Timestamps)
-            _y_min = float(_eq_1d.min())
-            _y_max = float(_eq_1d.max())
-            _annotations = []
-            for _i, _ts in enumerate(_fold_starts):
-                _ts_iso = _ts.isoformat() if hasattr(_ts, "isoformat") else str(_ts)
-                _fig_eq.add_shape(
-                    type="line", xref="x", yref="paper",
-                    x0=_ts_iso, x1=_ts_iso, y0=0, y1=1,
-                    line=dict(color="rgba(255,255,255,0.35)",
-                              dash="dash", width=0.8),
-                )
-                _annotations.append(dict(
-                    x=_ts_iso, y=1.02, xref="x", yref="paper",
-                    text=f"f{_i}", showarrow=False,
-                    font=dict(size=10, color="#aaa"),
+
+            # Per-fold indicators (downsamplés, ~80-150 pts/fold)
+            _pts_per_fold = max(80, 2000 // max(1, len(_fold_indicators)))
+            _lbl_seen = set()
+            def _show(label):
+                v = label not in _lbl_seen
+                _lbl_seen.add(label)
+                return v
+
+            for _fi in _fold_indicators:
+                _s = max(1, len(_fi["index"]) // _pts_per_fold)
+                _ip = _fi["index"][::_s]
+                _fig_vbt.add_trace(go.Scatter(
+                    x=_ip, y=_fi["range_hi"][::_s], mode="lines",
+                    line=dict(color="#3498db", width=1, dash="dash"),
+                    name="Upper band", showlegend=_show("hi"),
+                    legendgroup="hi", opacity=0.8,
                 ))
-            _fig_eq.update_layout(
-                title=f"{pair} · {run_cfg} — VBT replay walk-forward OOS "
-                      f"(equity concaténée, resample 1D · {len(_equity_pieces)} folds · "
-                      f"{_n_trades_total} trades)",
-                yaxis_title="Equity ($, base 10_000)", height=430,
-                xaxis_title="Date",
-                annotations=_annotations,
+                _fig_vbt.add_trace(go.Scatter(
+                    x=_ip, y=_fi["range_lo"][::_s], mode="lines",
+                    line=dict(color="#e74c3c", width=1, dash="dash"),
+                    name="Lower band", showlegend=_show("lo"),
+                    legendgroup="lo", opacity=0.8,
+                ))
+                _fig_vbt.add_trace(go.Scatter(
+                    x=_ip, y=_fi["ma"][::_s], mode="lines",
+                    line=dict(color="#f39c12", width=1, dash="dot"),
+                    name="MA", showlegend=_show("ma"),
+                    legendgroup="ma", opacity=0.75,
+                ))
+                # Séparateur de fold — orange si params changent, gris sinon
+                _fig_vbt.add_vline(
+                    x=str(_fi["test_start"]),
+                    line=dict(
+                        color="rgba(230,126,34,0.6)" if _fi["params_changed"]
+                              else "rgba(180,180,180,0.35)",
+                        width=1.5 if _fi["params_changed"] else 0.8,
+                        dash="solid" if _fi["params_changed"] else "dash",
+                    ),
+                )
+
+            _fig_vbt.update_layout(
+                xaxis_rangeslider_visible=False,
+                template="plotly_dark",
+                paper_bgcolor="#0f0f1a",
+                plot_bgcolor="#161625",
+                height=700,
+                title=dict(
+                    text=(f"{pair} · {run_cfg} · {approach_id} — "
+                          f"{_n_folds_used} folds · lev x{_lev:.1f}"),
+                    font=dict(color="#ddd", size=12),
+                ),
+                legend=dict(bgcolor="rgba(0,0,0,0.3)",
+                            font=dict(color="#ccc", size=10)),
             )
 
-            _fig_dd = go.Figure()
-            _fig_dd.add_trace(go.Scatter(
-                x=_dd_pct.index, y=_dd_pct.values, mode="lines",
-                fill="tozeroy",
-                line=dict(color="#e74c3c", width=1),
-                name="Drawdown %",
-            ))
-            _fig_dd.update_layout(
-                title="Drawdown %", yaxis_title="%", height=220,
-                xaxis_title="Date",
-            )
-
-            _fig_folds = go.Figure([go.Bar(
-                x=list(range(len(_fold_returns))), y=_fold_returns,
-                marker_color=["#2ecc71" if r > 0 else "#e74c3c"
-                              for r in _fold_returns],
-                text=[f"{r:+.2f}%" for r in _fold_returns],
-                textposition="outside",
-            )])
-            _fig_folds.update_layout(
-                title="Return par fold (VBT replay)",
-                xaxis_title="Fold", yaxis_title="Return %", height=280,
-            )
+            _ret_tot = float((_pf_wf.value.iloc[-1] / _pf_wf.value.iloc[0] - 1) * 100)
+            _max_dd  = float((_pf_wf.value / _pf_wf.value.cummax() - 1).min() * 100)
+            _n_tr    = int(_pf_wf.trades.count() or 0)
 
             mo.output.replace(mo.vstack([
-                mo.md(f"## §4 VBT replay walk-forward — {pair}"),
-                mo.md(
-                    f"_Re-run du kernel `{approach_id}` sur chaque fold OOS avec "
-                    f"les params optimisés, concaténation des equities, "
-                    f"resample 1D pour affichage léger._"
-                ),
+                mo.md(f"## §4 Walk-Forward — {pair} · {run_cfg}"),
                 mo.hstack([
-                    mo.stat(label="Return total", value=f"{_total_ret:.1f}%"),
-                    mo.stat(label="Max DD", value=f"{_max_dd:.1f}%"),
-                    mo.stat(label="DD dur (j)", value=f"{_dd_dur_days}"),
-                    mo.stat(label="N trades", value=str(_n_trades_total)),
-                    mo.stat(label="N folds", value=str(len(_equity_pieces))),
-                ], justify="start", gap=4),
-                mo.ui.plotly(_fig_eq),
-                mo.ui.plotly(_fig_dd),
-                mo.ui.plotly(_fig_folds),
+                    mo.stat(label="Return total", value=f"{_ret_tot:.1f}%"),
+                    mo.stat(label="Max DD",       value=f"{_max_dd:.1f}%"),
+                    mo.stat(label="Trades",       value=str(_n_tr)),
+                    mo.stat(label="Folds",        value=f"{_n_folds_used}"),
+                    mo.stat(label="Levier",       value=f"x{_lev:.1f}"),
+                ], gap=4, justify="start"),
+                mo.ui.plotly(_fig_vbt),
+                mo.md("---"),
+                mo.md("### pf.stats() — période walk-forward complète"),
+                mo.ui.table(_stats_df.reset_index(drop=True),
+                            selection=None, page_size=60),
             ]))
     return
 

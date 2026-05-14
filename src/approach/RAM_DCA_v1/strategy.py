@@ -33,7 +33,7 @@ _target_freq: str = "5min"
 _init_cash: float = 10_000.0
 
 
-@njit(cache=True)
+@njit
 def _ram_dca_nb(high, low, close, ma, upper_envs, lower_envs, allocations, sl_pct):
     n = len(close)
     n_levels = len(allocations)
@@ -178,6 +178,10 @@ ENV_MIN_GAP = 0.01  # 1%
 class Strategy(BaseStrategy):
     """RAM DCA — DCA mean-reversion 1-3 bandes avec hard SL + cooldown."""
 
+    def score(self, metrics):
+        from engine.scoring import score_robust
+        return score_robust(metrics)
+
     def param_space(self, trial) -> Dict[str, Any]:
         ma_window = trial.suggest_int("ma_window", 20, 200)
         n_bands_target = trial.suggest_int("n_bands", 1, 3)
@@ -232,39 +236,37 @@ class Strategy(BaseStrategy):
             "ohlc4": False,               # fixé — pas optimisé
         }
 
-    def run_backtest(self, data, params):
+    def compute_target_arrays(self, data, params):
+        """Returns (size_s, price_s) for vbt.Portfolio.from_orders TargetPercent."""
         if data is None or len(data) < params["ma_window"] + 10:
-            return None
-
+            return None, None
         envelope_levels = list(params["env_levels"])
         allocations = np.array(params["allocations"], dtype=np.float64)
         n_levels = len(envelope_levels)
         if n_levels == 0 or len(allocations) != n_levels:
-            return None
-
+            return None, None
         if params.get("ohlc4"):
             src = (data["open"] + data["high"] + data["low"] + data["close"]) / 4
         else:
             src = data["close"]
-
         ma = vbt.MA.run(src, window=params["ma_window"]).ma
-
-        n_levels = len(envelope_levels)
         n_bars = len(data)
         upper = np.zeros((n_levels, n_bars))
         lower = np.zeros((n_levels, n_bars))
         for i, pct in enumerate(envelope_levels):
             upper[i] = (ma * (1.0 + pct)).values
             lower[i] = (ma * (1.0 - pct)).values
-
         ts, px = _ram_dca_nb(
             data["high"].values, data["low"].values, data["close"].values,
             ma.values, upper, lower, allocations,
             float(params["sl_pct"]),
         )
-        size_s = pd.Series(ts, index=data.index)
-        price_s = pd.Series(px, index=data.index)
+        return pd.Series(ts, index=data.index), pd.Series(px, index=data.index)
 
+    def run_backtest(self, data, params):
+        size_s, price_s = self.compute_target_arrays(data, params)
+        if size_s is None:
+            return None
         pf = vbt.Portfolio.from_orders(
             close=data["close"],
             size=size_s,

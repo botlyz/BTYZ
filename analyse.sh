@@ -5,6 +5,7 @@ PORT=2718
 echo "Nettoyage des instances précédentes..."
 pkill -f "cloudflared tunnel" 2>/dev/null
 pkill -f "marimo edit" 2>/dev/null
+pkill -f "marimo run" 2>/dev/null
 # pkill -f "opti.py" 2>/dev/null  # désactivé pour ne pas tuer l'opti en cours
 sleep 1
 
@@ -83,7 +84,7 @@ fi
 # ── 1. Lancer marimo ─────────────────────────────────────────────────────────
 export MARIMO_OUTPUT_MAX_BYTES=200000000
 echo ""
-MARIMO_CMD="edit"
+MARIMO_CMD="run"
 echo "Démarrage de marimo → $NB"
 .venv/bin/marimo $MARIMO_CMD "$NB" --host 0.0.0.0 --port $PORT --headless --no-token &
 MARIMO_PID=$!

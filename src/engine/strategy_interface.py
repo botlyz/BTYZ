@@ -22,3 +22,15 @@ class BaseStrategy(ABC):
         """Composite score for Optuna. Override for custom scoring."""
         from .scoring import score_default
         return score_default(metrics)
+
+    def compute_target_arrays(self, data, params: Dict[str, Any]):
+        """OPTIONAL — returns (size_series, price_series) for `data` with `params`.
+
+        Used by the analyse notebook to stitch a global vbt.Portfolio across
+        all walk-forward folds (instead of concatenating per-fold equities).
+
+        Must be a pure transformation: same call as inside run_backtest but
+        without the Portfolio construction. Default returns (None, None) and
+        the notebook falls back to per-fold equity concat.
+        """
+        return None, None

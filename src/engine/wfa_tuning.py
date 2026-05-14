@@ -48,10 +48,19 @@ DEFAULT_CONFIGS = [
     (30,  14,  14,  "30d_14d_14d"),
     (60,  14,  14,  "60d_14d_14d"),
     (60,  21,  21,  "60d_21d_21d"),
-    (90,  21,  21,  "90d_21d_21d"),   # current default
+    (90,  21,  21,  "90d_21d_21d"),   # historical default
     (90,  21,  7,   "90d_21d_7d"),    # overlapping (3x folds)
-    (90,  30,  30,  "90d_30d_30d"),
+    (90,  30,  30,  "90d_30d_30d"),   # previous winner
     (180, 30,  30,  "180d_30d_30d"),
+    # ── round 2 — longer train + longer test + light overlap ──
+    (60,  30,  30,  "60d_30d_30d"),
+    (90,  45,  45,  "90d_45d_45d"),
+    (90,  60,  60,  "90d_60d_60d"),
+    (120, 30,  30,  "120d_30d_30d"),
+    (120, 45,  45,  "120d_45d_45d"),
+    (120, 60,  60,  "120d_60d_60d"),
+    (150, 30,  30,  "150d_30d_30d"),
+    (120, 30,  15,  "120d_30d_15d"),  # light overlap with long train
 ]
 
 

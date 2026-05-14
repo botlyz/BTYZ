@@ -223,6 +223,9 @@ def run_pair(approach_id: str, pair: str, tf: str, fees: float, out_dir: Path,
 
 def run_grid(approach_id: str, tfs: Sequence[str], bps_list: Sequence[int],
              pairs: Sequence[str], **kwargs) -> None:
+    from .approach_loader import load_strategy_module
+    load_strategy_module(approach_id)  # pre-warm once before any thread/process is spawned
+
     out_root = RESULTS_ROOT / approach_id / "full"
     out_root.mkdir(parents=True, exist_ok=True)
 
@@ -243,8 +246,12 @@ def run_grid(approach_id: str, tfs: Sequence[str], bps_list: Sequence[int],
     progress = tqdm(total=total_runs, unit="run", ncols=90,
                     bar_format="{l_bar}{bar}| {n}/{total} [{elapsed}<{remaining}, {rate_fmt}]")
 
+    train_days = kwargs.get("train_days", DEFAULT_TRAIN_DAYS)
+    test_days  = kwargs.get("test_days",  DEFAULT_TEST_DAYS)
+    step_days  = kwargs.get("step_days",  DEFAULT_STEP_DAYS)
+
     for tf, bps in grid:
-        run_tag = f"{tf}_{bps}bps"
+        run_tag = f"{tf}_{bps}bps_{train_days}d{test_days}d{step_days}d"
         out_dir = out_root / run_tag
         progress.set_description(run_tag)
 

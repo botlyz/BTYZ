@@ -125,29 +125,29 @@ class Strategy(BaseStrategy):
             "ohlc4":      trial.suggest_categorical("ohlc4", [False, True]),
         }
 
-    def run_backtest(self, data, params):
+    def compute_target_arrays(self, data, params):
+        """Returns (size_s, price_s) for vbt.Portfolio.from_orders TargetPercent."""
         if data is None or len(data) < params["ma_window"] + params["atr_window"] + 10:
-            return None
-
+            return None, None
         if params["ohlc4"]:
             src = (data["open"] + data["high"] + data["low"] + data["close"]) / 4
         else:
             src = data["close"]
-
         ma = vbt.MA.run(src, window=params["ma_window"]).ma
         atr = vbt.ATR.run(data["high"], data["low"], data["close"], window=params["atr_window"]).atr
-
         upper = (ma + params["atr_mult"] * atr).values
         lower = (ma - params["atr_mult"] * atr).values
-
         ts, px = _atr_envelope_nb(
             data["high"].values, data["low"].values, data["close"].values,
             ma.values, upper, lower,
             float(params["sl_mult"]), atr.values,
         )
-        size_s = pd.Series(ts, index=data.index)
-        price_s = pd.Series(px, index=data.index)
+        return pd.Series(ts, index=data.index), pd.Series(px, index=data.index)
 
+    def run_backtest(self, data, params):
+        size_s, price_s = self.compute_target_arrays(data, params)
+        if size_s is None:
+            return None
         pf = vbt.Portfolio.from_orders(
             close=data["close"],
             size=size_s,

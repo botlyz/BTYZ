@@ -45,6 +45,50 @@ def score_default(metrics) -> float:
     return sharpe_score + pf_score + ret_score + trade_score - dd_penalty - wr_penalty
 
 
+def score_robust(metrics) -> float:
+    """Robust composite: réduit le poids du Sharpe (cap 5),
+    pénalise dur la durée de drawdown, le DD au-delà de 5%, et le tail risk.
+
+    Pourquoi: avec un cap Sharpe à 7 et aucune pénalité DD-duration, Optuna
+    convergeait vers des folds chanceux (peu de trades, Sharpe gonflé, long
+    drawdown invisible). Ici on récompense la stabilité plutôt que le pic.
+    """
+    if metrics is None:
+        return -10.0
+
+    sh      = metrics.get("sharpe_ratio", 0) or 0
+    dd      = abs(metrics.get("max_drawdown_pct", 0) or 0)
+    dd_dur  = float(metrics.get("max_drawdown_duration", 0) or 0)  # en jours
+    tr      = _trade_count(metrics)
+    pf      = metrics.get("profit_factor", 0) or metrics.get("trades_profit_factor", 0) or 0
+    ret     = metrics.get("total_return_pct", 0) or 0
+    wr      = (metrics.get("win_rate_pct", 0) or 0) / 100.0
+    worst   = abs(metrics.get("worst_trade_pct", 0) or 0)
+
+    if tr <= 0:
+        return -8.0
+    if tr < 10:                  # trop peu de trades = bruit pur
+        return -5.0 + sh * 0.1
+    if dd > 50:
+        return -3.0 + sh * 0.1
+
+    # Sharpe : cap 5 (au lieu de 7) — moins de poids aux folds chanceux
+    sharpe_score   = min(max(sh, 0), 5) * 1.5            # max 7.5
+    # PF, return : bonus mineurs
+    pf_score       = min(max(pf - 1.0, 0), 2.0) * 0.4    # max 0.8
+    ret_score      = min(max(ret, 0), 30.0) * 0.01       # max 0.3
+    trade_score    = _trade_density_score(tr)            # max 0.75
+
+    # Pénalités structurelles — plus strictes
+    dd_penalty     = max(dd - 5.0, 0) * 0.10             # kick-in à 5% (vs 20%)
+    dd_dur_penalty = max(dd_dur - 7.0, 0) * 0.15         # >7 jours pénalisé
+    worst_penalty  = max(worst - 5.0, 0) * 0.10          # tail risk
+    wr_penalty     = max(0.50 - wr, 0) * 1.0
+
+    return (sharpe_score + pf_score + ret_score + trade_score
+            - dd_penalty - dd_dur_penalty - worst_penalty - wr_penalty)
+
+
 def score_high_frequency(metrics) -> float:
     """For HF strategies (target 500–1500 trades)."""
     if metrics is None:
@@ -93,6 +137,7 @@ def score_trend(metrics) -> float:
 
 SCORING_REGISTRY = {
     "default": score_default,
+    "robust": score_robust,
     "high_frequency": score_high_frequency,
     "trend": score_trend,
 }

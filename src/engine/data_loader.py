@@ -9,8 +9,20 @@ from .config import DATA_ROOT, FREQ_MAP
 
 @lru_cache(maxsize=32)
 def load_lighter(pair: str, tf: str = "15min") -> pd.DataFrame | None:
-    """Load OHLCV from data/raw/lighter/{1m,1min}/<PAIR>.csv and resample."""
+    """Load OHLCV from data/raw/lighter/<tf>/<PAIR>.csv (direct if exists, else resample from 1m)."""
     base = pair.replace("USDT", "")
+    tf_folder = FREQ_MAP.get(tf, tf).replace("min", "m")
+
+    # Try direct pre-built folder first (faster, less RAM)
+    fp_direct = DATA_ROOT / "lighter" / tf_folder / f"{base}.csv"
+    if fp_direct.exists():
+        df = pd.read_csv(fp_direct, low_memory=False,
+                         usecols=["date", "open", "high", "low", "close", "volume"])
+        df["date"] = pd.to_datetime(df["date"], unit="ms", utc=True)
+        df = df.set_index("date").sort_index()
+        return df if len(df) >= 1000 else None
+
+    # Fallback: resample from 1m
     for sub in ("1m", "1min"):
         fp = DATA_ROOT / "lighter" / sub / f"{base}.csv"
         if fp.exists():
