@@ -944,15 +944,25 @@ def _section5_controls(mo):
         value=False,
         label="Re-opti extension : 150 trials Optuna sur les 90 derniers jours avant la fin WFA, puis applique aux bars post-WFA (cache JSON par paire)",
     )
+    reopti_score_p = mo.ui.dropdown(
+        options={
+            "default (score de la strat)": "default",
+            "robust v1 (sharpe-dominant)": "robust",
+            "robust v2 (force trade count)": "robust_v2",
+        },
+        value="default (score de la strat)",
+        label="Score à utiliser pour la re-opti",
+    )
     run_btn = mo.ui.run_button(label="▶ Lancer le backtest multi-paires", kind="success")
     mo.output.replace(mo.vstack([
         mo.md("### §5 — Contrôles portfolio"),
         mo.hstack([init_cash_p, alloc_pair_p, bps_p, lev_p],
                   gap=3, justify="start"),
         use_extra_p,
+        reopti_score_p,
         run_btn,
     ]))
-    return alloc_pair_p, bps_p, init_cash_p, lev_p, run_btn, use_extra_p
+    return alloc_pair_p, bps_p, init_cash_p, lev_p, reopti_score_p, run_btn, use_extra_p
 
 
 @app.cell
@@ -968,6 +978,7 @@ def _section5_portfolio(
     parse_tf_bps,
     pd,
     portfolio_table,
+    reopti_score_p,
     run_btn,
     use_extra_p,
 ):
@@ -1059,9 +1070,10 @@ def _section5_portfolio(
                     continue
                 _anchor_pf = pd.Timestamp(_last_t1_pf)
                 _anchor_iso_pf = _anchor_pf.strftime("%Y%m%dT%H%M%S")
+                _score_tag = reopti_score_p.value or "default"
                 _cache_dir_pf = _RESULTS_ROOT / _ap_pf / "extension_reopti" / _rc_pf
                 _cache_file_pf = _cache_dir_pf / (
-                    f"{_pr_pf}_anchor{_anchor_iso_pf}_t90_tr150.json"
+                    f"{_pr_pf}_anchor{_anchor_iso_pf}_t90_tr150_score-{_score_tag}.json"
                 )
                 # cross-exchange detection
                 try:
@@ -1080,7 +1092,7 @@ def _section5_portfolio(
                         _ap_pf, _pr_pf, _tf_pf, _anchor_pf.isoformat(),
                         str(_cache_file_pf), 90, 150,
                         float(_bps) * 1e-4, _slippage,
-                        str(_BASE_OHLCV_1M), _need_xe_pf,
+                        str(_BASE_OHLCV_1M), _need_xe_pf, _score_tag,
                     ))
 
             if _reopti_jobs:
@@ -1219,8 +1231,9 @@ def _section5_portfolio(
                 if _ext_end > _ext_start:
                     # Cache : déjà rempli par la phase 1 (parallèle)
                     _anchor_iso = _wfa_end_ts.strftime("%Y%m%dT%H%M%S")
+                    _score_tag_main = reopti_score_p.value or "default"
                     _cache_file = (_RESULTS_ROOT / _ap / "extension_reopti" / _rc
-                                   / f"{_pr}_anchor{_anchor_iso}_t90_tr150.json")
+                                   / f"{_pr}_anchor{_anchor_iso}_t90_tr150_score-{_score_tag_main}.json")
                     _reopti_params = None
                     if _cache_file.exists():
                         try:

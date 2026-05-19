@@ -14,10 +14,13 @@ def reopti_pair_worker(args: tuple) -> tuple:
     """Re-opti Optuna une paire. Retourne (pair, status, params_dict_or_None).
 
     args = (approach_id, pair, tf, anchor_iso, cache_file_str, train_days,
-            trials, fees, slippage, base_ohlcv_dir, with_cross_exchange).
+            trials, fees, slippage, base_ohlcv_dir, with_cross_exchange, score_name).
+
+    score_name ∈ {"default", "robust", "robust_v2", "default" (fallback strat.score)}.
     """
     (approach_id, pair, tf, anchor_iso, cache_file_str, train_days,
-     trials, fees, slippage, base_ohlcv_dir, with_cross_exchange) = args
+     trials, fees, slippage, base_ohlcv_dir, with_cross_exchange,
+     score_name) = args
 
     src_root = "/home/devbox/BTYZ/src"
     if src_root not in sys.path:
@@ -83,13 +86,23 @@ def reopti_pair_worker(args: tuple) -> tuple:
         if hasattr(mod, "_target_slippage"):
             mod._target_slippage = slippage
 
+    # Pick score function (override possible via score_name)
+    score_fn = strat.score
+    if score_name and score_name != "default":
+        try:
+            from engine.scoring import SCORING_REGISTRY
+            if score_name in SCORING_REGISTRY:
+                score_fn = SCORING_REGISTRY[score_name]
+        except Exception:
+            pass
+
     from engine.tpe_search import run_tpe_fold
     try:
         res = run_tpe_fold(
             train_data=train_df, test_data=train_df,
             param_space_fn=strat.param_space,
             run_backtest_fn=strat.run_backtest,
-            score_fn=strat.score,
+            score_fn=score_fn,
             trials=trials, min_trades_per_fold=10,
             seed=42, fold_idx=0, n_jobs=1,
         )
