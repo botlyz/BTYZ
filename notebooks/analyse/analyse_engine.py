@@ -1024,8 +1024,102 @@ def _section5_portfolio(
         import json as _json
 
         _RESULTS_ROOT = _pathlib.Path("/home/devbox/BTYZ/results")
-        _reopti_status = []  # pour affichage live
+        _BASE_OHLCV_1M = _pathlib.Path("/home/devbox/BTYZ/data/raw/lighter/1m")
+        _reopti_status = []
         _n_sel_total = len(_sel_df)
+
+        # ============================================================
+        # PHASE 1 — Pre-flight re-opti parallèle (ProcessPoolExecutor)
+        # ============================================================
+        # Pour chaque paire sélectionnée, calcule anchor (= last fold test_end) et
+        # le chemin de cache. Identifie les paires en cache miss → lance en parallèle.
+        _reopti_jobs = []      # liste de tuples args pour le worker
+        _reopti_cache_hits = []
+        _reopti_missing_summary = []
+        if use_extra_p.value:
+            for _, _row_pf in _sel_df.iterrows():
+                _ap_pf = _row_pf["approach"]
+                _rc_pf = _row_pf["run"]
+                _pr_pf = _row_pf["pair"]
+                _tf_pf, _ = parse_tf_bps(_rc_pf)
+                # Lookup anchor via summary
+                _sum_pf = load_summary(_ap_pf, _rc_pf, _pr_pf)
+                if _sum_pf is None:
+                    _reopti_missing_summary.append(f"{_pr_pf} (no summary)")
+                    continue
+                _folds_pf = flatten_summary(_sum_pf)
+                if _folds_pf.empty:
+                    _reopti_missing_summary.append(f"{_pr_pf} (no folds)")
+                    continue
+                _last_pf = sorted(_folds_pf.to_dict(orient="records"),
+                                  key=lambda r: r["fold"])[-1]
+                _last_t1_pf = _last_pf.get("test_end")
+                if pd.isna(_last_t1_pf):
+                    _reopti_missing_summary.append(f"{_pr_pf} (no test_end)")
+                    continue
+                _anchor_pf = pd.Timestamp(_last_t1_pf)
+                _anchor_iso_pf = _anchor_pf.strftime("%Y%m%dT%H%M%S")
+                _cache_dir_pf = _RESULTS_ROOT / _ap_pf / "extension_reopti" / _rc_pf
+                _cache_file_pf = _cache_dir_pf / (
+                    f"{_pr_pf}_anchor{_anchor_iso_pf}_t90_tr150.json"
+                )
+                # cross-exchange detection
+                try:
+                    _mod_chk = _load_mod(_ap_pf)
+                    _cls_chk = getattr(_mod_chk, "Strategy", None)
+                    _need_xe_pf = bool(
+                        _cls_chk is not None
+                        and getattr(_cls_chk, "DATA_SOURCE", None) == "cross_exchange"
+                    )
+                except Exception:
+                    _need_xe_pf = False
+                if _cache_file_pf.exists():
+                    _reopti_cache_hits.append(_pr_pf)
+                else:
+                    _reopti_jobs.append((
+                        _ap_pf, _pr_pf, _tf_pf, _anchor_pf.isoformat(),
+                        str(_cache_file_pf), 90, 150,
+                        float(_bps) * 1e-4, _slippage,
+                        str(_BASE_OHLCV_1M), _need_xe_pf,
+                    ))
+
+            if _reopti_jobs:
+                from concurrent.futures import ProcessPoolExecutor, as_completed
+                from engine.extension_reopti import reopti_pair_worker
+
+                _max_workers = min(len(_reopti_jobs), 8)
+                _reopti_done = 0
+                _reopti_results_status = []
+                mo.output.replace(mo.vstack([
+                    mo.md(f"## §5 Re-opti extension — {len(_reopti_jobs)} paires en parallèle (max {_max_workers} workers)"),
+                    mo.md(f"_Cache hits ({len(_reopti_cache_hits)}): {', '.join(_reopti_cache_hits) or '—'}_"),
+                    mo.md(f"_Lancement Optuna 150 trials × {len(_reopti_jobs)} paires…_"),
+                ]))
+
+                with ProcessPoolExecutor(max_workers=_max_workers) as _ex:
+                    _futs = {_ex.submit(reopti_pair_worker, _a): _a[1]
+                             for _a in _reopti_jobs}
+                    for _fut in as_completed(_futs):
+                        _reopti_done += 1
+                        try:
+                            _pp, _st, _ = _fut.result()
+                            _reopti_results_status.append(f"✓ {_pp}: {_st}")
+                        except Exception as _ex_e:
+                            _reopti_results_status.append(
+                                f"✗ {_futs[_fut]}: {_ex_e}"
+                            )
+                        mo.output.replace(mo.vstack([
+                            mo.md(f"## §5 Re-opti extension — {_reopti_done}/{len(_reopti_jobs)} terminées"),
+                            mo.md("\n".join(f"- {s}" for s in _reopti_results_status)),
+                            mo.md(f"_Cache hits ({len(_reopti_cache_hits)}): {', '.join(_reopti_cache_hits) or '—'}_"),
+                        ]))
+                _reopti_status = _reopti_results_status[:]
+            else:
+                _reopti_status = [f"✓ Toutes les paires en cache hit"]
+
+        # ============================================================
+        # PHASE 2 — Per-pair replay (utilise le cache re-opti pour extension)
+        # ============================================================
 
         for _row_idx, _row in _sel_df.iterrows():
             _ap = _row["approach"]
@@ -1123,64 +1217,16 @@ def _section5_portfolio(
                 _ext_start = int(_ohlcv.index.searchsorted(_wfa_end_ts, side="right"))
                 _ext_end = len(_ohlcv)
                 if _ext_end > _ext_start:
-                    # Cache lookup
-                    _cache_dir = _RESULTS_ROOT / _ap / "extension_reopti" / _rc
-                    _cache_dir.mkdir(parents=True, exist_ok=True)
+                    # Cache : déjà rempli par la phase 1 (parallèle)
                     _anchor_iso = _wfa_end_ts.strftime("%Y%m%dT%H%M%S")
-                    _cache_file = _cache_dir / f"{_pr}_anchor{_anchor_iso}_t90_tr150.json"
+                    _cache_file = (_RESULTS_ROOT / _ap / "extension_reopti" / _rc
+                                   / f"{_pr}_anchor{_anchor_iso}_t90_tr150.json")
                     _reopti_params = None
                     if _cache_file.exists():
                         try:
                             _reopti_params = _json.loads(_cache_file.read_text())
-                            _reopti_status.append(f"✓ {_pr} cache hit")
                         except Exception:
                             _reopti_params = None
-                    if _reopti_params is None:
-                        # Status live pendant la re-opti
-                        _reopti_status.append(f"⏳ {_pr} Optuna 150 trials…")
-                        mo.output.replace(mo.vstack([
-                            mo.md(f"## §5 Replay paire {_row_idx + 1}/{_n_sel_total} : `{_pr}`"),
-                            mo.md(f"_Re-opti extension (anchor {_anchor_iso}, train 90j, 150 trials)_"),
-                            mo.md("\n".join(f"- {s}" for s in _reopti_status[-12:])),
-                        ]))
-                        # Train window [anchor - 90j, anchor]
-                        _ts_anchor = _wfa_end_ts
-                        _train_end_idx = int(_ohlcv.index.searchsorted(_ts_anchor, side="left"))
-                        _train_start_idx = int(_ohlcv.index.searchsorted(
-                            _ts_anchor - pd.Timedelta(days=90), side="left"))
-                        if _train_end_idx - _train_start_idx >= 500:
-                            _train_df = _ohlcv.iloc[_train_start_idx:_train_end_idx]
-                            try:
-                                from engine.tpe_search import run_tpe_fold as _run_tpe
-                                with _w.catch_warnings():
-                                    _w.simplefilter("ignore")
-                                    _res = _run_tpe(
-                                        train_data=_train_df, test_data=_train_df,
-                                        param_space_fn=_strat.param_space,
-                                        run_backtest_fn=_strat.run_backtest,
-                                        score_fn=_strat.score,
-                                        trials=150, min_trades_per_fold=10,
-                                        seed=42, fold_idx=0, n_jobs=1,
-                                    )
-                            except Exception as _eopt:
-                                _errors.append(f"{_key} reopti: {_eopt}")
-                                _res = None
-                            if _res is not None and _res.get("params"):
-                                _reopti_params = _res["params"]
-                                try:
-                                    _cache_file.write_text(
-                                        _json.dumps(_reopti_params, indent=2, default=str)
-                                    )
-                                    _reopti_status[-1] = (
-                                        f"✓ {_pr} re-opti done "
-                                        f"(score train={_res.get('train_metrics', {}).get('sharpe_ratio', 0):.2f})"
-                                    )
-                                except Exception:
-                                    pass
-                            else:
-                                _reopti_status[-1] = f"✗ {_pr} reopti failed"
-                        else:
-                            _reopti_status[-1] = f"✗ {_pr} train trop court"
                     if _reopti_params is not None:
                         _wi = max(0, _ext_start - 300)
                         _slc_ext = _ohlcv.iloc[_wi:_ext_end]
