@@ -940,14 +940,19 @@ def _section5_controls(mo):
         start=1.0, stop=10.0, step=0.5, value=1.0,
         label="Levier", show_value=True,
     )
+    use_extra_p = mo.ui.checkbox(
+        value=True,
+        label="Utiliser toutes les données (étend avec params du dernier fold train pour les bars post-WFA)",
+    )
     run_btn = mo.ui.run_button(label="▶ Lancer le backtest multi-paires", kind="success")
     mo.output.replace(mo.vstack([
         mo.md("### §5 — Contrôles portfolio"),
         mo.hstack([init_cash_p, alloc_pair_p, bps_p, lev_p],
                   gap=3, justify="start"),
+        use_extra_p,
         run_btn,
     ]))
-    return alloc_pair_p, bps_p, init_cash_p, lev_p, run_btn
+    return alloc_pair_p, bps_p, init_cash_p, lev_p, run_btn, use_extra_p
 
 
 @app.cell
@@ -964,6 +969,7 @@ def _section5_portfolio(
     pd,
     portfolio_table,
     run_btn,
+    use_extra_p,
 ):
     """§5.2 — Replay walk-forward fold-par-fold pour chaque ligne cochée,
     puis VBT Portfolio mutualisé. Gate par `run_btn` (n'exécute que sur click)."""
@@ -1099,6 +1105,40 @@ def _section5_portfolio(
                 _errors.append(f"{_key}: 0 folds valides")
                 continue
 
+            # Extension : couvre les bars APRÈS le dernier fold OOS avec les params
+            # du dernier fold train (= "pseudo-live" sur données récentes).
+            _wfa_end_ts = None
+            _last_fr = sorted(_folds.to_dict(orient="records"),
+                              key=lambda r: r["fold"])[-1]
+            _last_t1 = _last_fr.get("test_end")
+            if not pd.isna(_last_t1):
+                _wfa_end_ts = pd.Timestamp(_last_t1)
+            if use_extra_p.value and _wfa_end_ts is not None:
+                _ext_start = int(_ohlcv.index.searchsorted(_wfa_end_ts, side="right"))
+                _ext_end = len(_ohlcv)
+                if _ext_end > _ext_start:
+                    _last_params = {
+                        k[2:]: v for k, v in _last_fr.items() if k.startswith("p_")
+                    }
+                    _wi = max(0, _ext_start - 300)
+                    _slc_ext = _ohlcv.iloc[_wi:_ext_end]
+                    if len(_slc_ext) >= 50:
+                        try:
+                            with _w.catch_warnings():
+                                _w.simplefilter("ignore")
+                                _ts_ext, _ep_ext = _strat.compute_target_arrays(
+                                    _slc_ext, _last_params
+                                )
+                        except Exception as _eext:
+                            _errors.append(
+                                f"{_key} extension compute_target_arrays: {_eext}"
+                            )
+                            _ts_ext = _ep_ext = None
+                        if _ts_ext is not None and _ep_ext is not None:
+                            _wl_ext = _ext_start - _wi
+                            _size_chunks.append(_ts_ext.iloc[_wl_ext:] * _alloc_eff)
+                            _price_chunks.append(_ep_ext.iloc[_wl_ext:])
+
             _size_pair = pd.concat(_size_chunks).sort_index()
             _size_pair = _size_pair[~_size_pair.index.duplicated(keep="last")]
             _price_pair = pd.concat(_price_chunks).sort_index()
@@ -1108,10 +1148,11 @@ def _section5_portfolio(
             ]
 
             _per_pair[_key] = {
-                "size":  _size_pair,
-                "price": _price_pair,
-                "close": _close_pair,
-                "tf":    _tf_str,
+                "size":     _size_pair,
+                "price":    _price_pair,
+                "close":    _close_pair,
+                "tf":       _tf_str,
+                "wfa_end":  _wfa_end_ts,
             }
 
         if len(_per_pair) < 2:
@@ -1244,7 +1285,9 @@ def _section5_portfolio(
                             title=(f"Portfolio mutualisé · {_n_pairs} paires · "
                                    f"total {_alloc_pct*100:.0f}% "
                                    f"({_per_pair_pct*100:.1f}%/paire) · "
-                                   f"lev x{_lev:.1f} · fees {int(_bps)}bps"),
+                                   f"lev x{_lev:.1f} · fees {int(_bps)}bps"
+                                   + (" · extension activée"
+                                      if use_extra_p.value else "")),
                             xaxis=dict(title="Date"),
                             yaxis=dict(title="Equity ($)", side="left"),
                             yaxis2=dict(title="Drawdown %", overlaying="y",
@@ -1252,6 +1295,37 @@ def _section5_portfolio(
                                         range=[min(_dd_d.min() * 1.1, -1), 1]),
                             legend=dict(orientation="h", y=1.02, x=0),
                         )
+
+                        # Trait vertical à la frontière WFA / extension
+                        # On prend le min(wfa_end) = moment où AU MOINS une paire
+                        # passe en mode extension.
+                        if use_extra_p.value:
+                            _wfa_ends = [v.get("wfa_end") for v in _per_pair.values()
+                                         if v.get("wfa_end") is not None]
+                            if _wfa_ends:
+                                _earliest_cutoff = min(_wfa_ends)
+                                _latest_cutoff = max(_wfa_ends)
+                                _fig_pf.add_shape(
+                                    type="line",
+                                    x0=_earliest_cutoff, x1=_earliest_cutoff,
+                                    y0=0, y1=1, xref="x", yref="paper",
+                                    line=dict(color="#f39c12", width=2, dash="dash"),
+                                )
+                                _fig_pf.add_annotation(
+                                    x=_earliest_cutoff, y=1.0, xref="x", yref="paper",
+                                    text="⇤ WFA  |  extension ⇥",
+                                    showarrow=False, yshift=10,
+                                    font=dict(color="#f39c12", size=11),
+                                    bgcolor="rgba(15,15,26,0.7)",
+                                )
+                                # 2ème ligne si gap entre paires > 30 jours
+                                if (_latest_cutoff - _earliest_cutoff).days > 30:
+                                    _fig_pf.add_shape(
+                                        type="line",
+                                        x0=_latest_cutoff, x1=_latest_cutoff,
+                                        y0=0, y1=1, xref="x", yref="paper",
+                                        line=dict(color="#f39c12", width=1, dash="dot"),
+                                    )
                     except Exception:
                         _fig_pf = None
 
