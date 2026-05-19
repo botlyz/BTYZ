@@ -207,14 +207,21 @@ def _build_can_trade(close, rsi_length, rsi_level, rsi_mode):
 
     inside  → trade si  (100-level) < RSI < level     (zone neutre)
     outside → trade si  RSI <= (100-level)  OR  RSI >= level   (zones extrêmes)
+
+    Shift +1 : la décision pour bar i utilise RSI[i-1] (= close fermé avant
+    l'ouverture de bar i, info disponible côté live au moment du cron). Sans
+    ce shift, on aurait un look-ahead bias : RSI[i] est calculé sur close[i],
+    info connue seulement à la fin de bar i, donc inutilisable en live où on
+    décide AVANT que la bar s'ouvre.
     """
     rsi = _rsi_nb(close, rsi_length)
     lo = 100.0 - rsi_level
     hi = rsi_level
     if rsi_mode == "inside":
-        return (rsi > lo) & (rsi < hi)
+        can = (rsi > lo) & (rsi < hi)
     else:  # outside
-        return (rsi <= lo) | (rsi >= hi)
+        can = (rsi <= lo) | (rsi >= hi)
+    return np.concatenate(([False], can[:-1]))
 
 
 class Strategy(BaseStrategy):
@@ -270,18 +277,27 @@ class Strategy(BaseStrategy):
             str(params["rsi_mode"]),
         )
 
+        # NOTE: kernel retourne ±1.0 (alloc=1.0). Le scaling à ALLOC_FIXED se fait
+        # dans run_backtest. Ça permet au notebook §4 d'override l'alloc via le
+        # slider size_pct (slider * _size_scale réécrit la taille en fonction du
+        # slider et de ALLOC_FIXED), comme pour ATR_ENV_v1 / FUNDING_HARVEST_v1.
         ts, px = _ram_single_env_nb(
             data["high"].values, data["low"].values, data["close"].values,
             ma.values, upper, lower,
-            float(params["sl_pct"]), float(ALLOC_FIXED),
+            float(params["sl_pct"]), 1.0,
             can_trade,
         )
         return pd.Series(ts, index=data.index), pd.Series(px, index=data.index)
+
+    # Fraction du capital allouée par position dans le BT — matche le live.
+    SIZE_PCT = ALLOC_FIXED
 
     def run_backtest(self, data, params):
         size_s, price_s = self.compute_target_arrays(data, params)
         if size_s is None:
             return None
+        # Kernel émet ±1 → scale ici à ±ALLOC_FIXED (=0.10 par défaut)
+        size_s = size_s * self.SIZE_PCT
         pf = vbt.Portfolio.from_orders(
             close=data["close"],
             size=size_s,
