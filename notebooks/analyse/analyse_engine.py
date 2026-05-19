@@ -1329,26 +1329,56 @@ def _section5_portfolio(
                     except Exception:
                         _fig_pf = None
 
-                    # Allocations DAILY resamplé pour limiter la taille
+                    # Perf cumulative par paire en $ (asset_pnl par colonne, daily resamplé)
+                    # group_by=False force le résultat per-asset (sinon = somme groupée = Series)
                     try:
-                        if isinstance(_allocs, pd.DataFrame) and not _allocs.empty:
-                            _allocs_d = _allocs.resample("1D").last().fillna(0)
-                            _fig_alloc = _go.Figure()
-                            for _p in _per_pair:
-                                if _p not in _allocs_d.columns:
+                        with _w.catch_warnings():
+                            _w.simplefilter("ignore")
+                            _apnl = _pf.get_asset_pnl(group_by=False)
+                        if isinstance(_apnl, pd.DataFrame) and not _apnl.empty:
+                            _cum_d = _apnl.fillna(0).cumsum().resample("1D").last().ffill()
+                            _fig_perf = _go.Figure()
+                            _palette = [
+                                "#2ecc71", "#3498db", "#e74c3c", "#f39c12", "#9b59b6",
+                                "#1abc9c", "#e67e22", "#f1c40f", "#16a085", "#d35400",
+                                "#8e44ad", "#27ae60", "#c0392b", "#2980b9", "#7f8c8d",
+                            ]
+                            for _idx, _p in enumerate(_per_pair):
+                                if _p not in _cum_d.columns:
                                     continue
-                                _a = _allocs_d[_p]
-                                _fig_alloc.add_trace(_go.Scatter(
-                                    x=_a.index, y=_a.values * 100,
-                                    mode="lines", name=_p, stackgroup="one",
+                                _y = _cum_d[_p]
+                                _color = _palette[_idx % len(_palette)]
+                                _fig_perf.add_trace(_go.Scatter(
+                                    x=_y.index, y=_y.values,
+                                    mode="lines", name=_p,
+                                    line=dict(color=_color, width=1.5),
+                                    hovertemplate=(f"<b>{_p}</b><br>"
+                                                   "%{x|%Y-%m-%d}<br>"
+                                                   "PnL cum: $%{y:.2f}<extra></extra>"),
                                 ))
-                            _fig_alloc.update_layout(
+                            _fig_perf.add_hline(y=0, line=dict(
+                                color="rgba(200,200,200,0.4)", width=1, dash="dot",
+                            ))
+                            # Reuse WFA cutoff line (cohérent avec equity plot)
+                            if use_extra_p.value:
+                                _wfa_ends2 = [v.get("wfa_end") for v in _per_pair.values()
+                                              if v.get("wfa_end") is not None]
+                                if _wfa_ends2:
+                                    _fig_perf.add_shape(
+                                        type="line",
+                                        x0=min(_wfa_ends2), x1=min(_wfa_ends2),
+                                        y0=0, y1=1, xref="x", yref="paper",
+                                        line=dict(color="#f39c12", width=2, dash="dash"),
+                                    )
+                            _fig_perf.update_layout(
                                 template="plotly_dark",
                                 paper_bgcolor="#0f0f1a", plot_bgcolor="#161625",
-                                height=300,
-                                title="Allocations par paire (% portfolio, daily)",
-                                xaxis_title="Date", yaxis_title="%",
+                                height=380,
+                                title="PnL cumulatif par paire (contribution $ au portfolio)",
+                                xaxis_title="Date", yaxis_title="PnL cumulé ($)",
+                                hovermode="x unified",
                             )
+                            _fig_alloc = _fig_perf
                         else:
                             _fig_alloc = None
                     except Exception:
