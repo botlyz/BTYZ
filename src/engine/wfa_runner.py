@@ -71,6 +71,9 @@ def _run_fold_worker(args):
     if hasattr(mod, "_target_freq"):
         mod._target_freq = vbt_freq
     # _target_slippage stays at strategy module default (2 bps unless engine overrides)
+    # Approche optionnelle : si le module expose `_per_pair_fees_resolver(pair) → float`,
+    # on l'utilise pour override fees par paire (utile pour cross-exchange).
+    # Le pair name doit avoir été passé via les args (extension future).
 
     result = run_tpe_fold(
         train_data=train_df,
@@ -106,6 +109,20 @@ def run_pair(approach_id: str, pair: str, tf: str, fees: float, out_dir: Path,
     if ohlcv is None:
         tqdm.write(f"  [{pair}] OHLCV introuvable — skip")
         return None
+
+    # Per-pair fees override : si le module strategie expose `_load_pair_fees(pair)`,
+    # on l'utilise au lieu du `fees` global (utile pour cross-exchange où taker + half-spread
+    # diffèrent par paire). `bps` CLI sert alors juste de baseline si la fonction renvoie None.
+    try:
+        from engine.approach_loader import load_strategy_module
+        _mod = load_strategy_module(approach_id)
+        if hasattr(_mod, "_load_pair_fees"):
+            override = _mod._load_pair_fees(pair)
+            if override and override > 0:
+                tqdm.write(f"  [{pair}] fees override per-pair = {override*1e4:.2f} bps/fill (vs global {fees*1e4:.2f})")
+                fees = float(override)
+    except Exception as _e:
+        tqdm.write(f"  [{pair}] per-pair fees lookup failed: {_e}")
 
     bar_min = BAR_MINUTES.get(vbt_freq, 15)
     folds = compute_folds(len(ohlcv), train_days, test_days, step_days, vbt_freq)

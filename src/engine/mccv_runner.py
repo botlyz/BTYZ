@@ -171,8 +171,11 @@ def run_mccv(approach_id: str, pair: str, tf: str, bps: int,
         "targets": [r["target"] for r in rows],
         "rows": rows,
     }
-    out_path = RESULTS_ROOT / approach_id / "mccv" / f"{pair}_{tf}_{bps}bps.json"
+    # Filename inclut train/test pour éviter écrasement entre configs grid
+    out_path = RESULTS_ROOT / approach_id / "mccv" / f"{pair}_{tf}_{bps}bps_{train_days}t_{test_days}o.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    out["train_days"] = train_days
+    out["test_days"] = test_days
     out_path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"[{pair}/{tf}/{bps}bps] MCCV saved: {len(rows)} targets → {out_path}")
+    print(f"[{pair}/{tf}/{bps}bps/{train_days}t/{test_days}o] MCCV saved: {len(rows)} targets → {out_path}")
     return out

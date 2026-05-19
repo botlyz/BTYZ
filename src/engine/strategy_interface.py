@@ -34,3 +34,24 @@ class BaseStrategy(ABC):
         the notebook falls back to per-fold equity concat.
         """
         return None, None
+
+    def compute_cash_dividends(self, data, params: Dict[str, Any] = None):
+        """OPTIONAL — per-share cash flow externe au PnL price (ex: funding income).
+
+        Format: pd.Series indexee comme `data`, valeurs PAR SHARE (vbt multiplie
+        automatiquement par la position courante `assets`). Cette approche est
+        compound-correcte et scale natif avec slider size_pct / leverage.
+
+        Returns None si la strat n'a pas de revenu externe scale (defaut).
+        Le notebook analyse passe la Series a vbt.Portfolio.from_orders(cash_dividends=...).
+        """
+        return None
+
+    def compute_cash_earnings(self, data, size_series, params: Dict[str, Any] = None):
+        """DEPRECATED — utiliser compute_cash_dividends qui scale natif.
+
+        Returns None par defaut. Le notebook analyse passe la Series a
+        vbt.Portfolio.from_orders(cash_earnings=...) si non-None. Conserve pour
+        backward-compat ; nouvelles strats devraient implementer cash_dividends.
+        """
+        return None
