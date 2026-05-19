@@ -941,8 +941,8 @@ def _section5_controls(mo):
         label="Levier", show_value=True,
     )
     use_extra_p = mo.ui.checkbox(
-        value=True,
-        label="Utiliser toutes les données (étend avec params du dernier fold train pour les bars post-WFA)",
+        value=False,
+        label="Re-opti extension : 150 trials Optuna sur les 90 derniers jours avant la fin WFA, puis applique aux bars post-WFA (cache JSON par paire)",
     )
     run_btn = mo.ui.run_button(label="▶ Lancer le backtest multi-paires", kind="success")
     mo.output.replace(mo.vstack([
@@ -1020,8 +1020,14 @@ def _section5_portfolio(
             instantiate_strategy as _instantiate,
             load_strategy_module as _load_mod,
         )
+        import pathlib as _pathlib
+        import json as _json
 
-        for _, _row in _sel_df.iterrows():
+        _RESULTS_ROOT = _pathlib.Path("/home/devbox/BTYZ/results")
+        _reopti_status = []  # pour affichage live
+        _n_sel_total = len(_sel_df)
+
+        for _row_idx, _row in _sel_df.iterrows():
             _ap = _row["approach"]
             _rc = _row["run"]
             _pr = _row["pair"]
@@ -1105,8 +1111,8 @@ def _section5_portfolio(
                 _errors.append(f"{_key}: 0 folds valides")
                 continue
 
-            # Extension : couvre les bars APRÈS le dernier fold OOS avec les params
-            # du dernier fold train (= "pseudo-live" sur données récentes).
+            # Extension : couvre les bars APRÈS le dernier fold OOS via re-opti
+            # Optuna 150 trials sur [anchor - 90j, anchor]. Cache JSON par paire.
             _wfa_end_ts = None
             _last_fr = sorted(_folds.to_dict(orient="records"),
                               key=lambda r: r["fold"])[-1]
@@ -1117,27 +1123,83 @@ def _section5_portfolio(
                 _ext_start = int(_ohlcv.index.searchsorted(_wfa_end_ts, side="right"))
                 _ext_end = len(_ohlcv)
                 if _ext_end > _ext_start:
-                    _last_params = {
-                        k[2:]: v for k, v in _last_fr.items() if k.startswith("p_")
-                    }
-                    _wi = max(0, _ext_start - 300)
-                    _slc_ext = _ohlcv.iloc[_wi:_ext_end]
-                    if len(_slc_ext) >= 50:
+                    # Cache lookup
+                    _cache_dir = _RESULTS_ROOT / _ap / "extension_reopti" / _rc
+                    _cache_dir.mkdir(parents=True, exist_ok=True)
+                    _anchor_iso = _wfa_end_ts.strftime("%Y%m%dT%H%M%S")
+                    _cache_file = _cache_dir / f"{_pr}_anchor{_anchor_iso}_t90_tr150.json"
+                    _reopti_params = None
+                    if _cache_file.exists():
                         try:
-                            with _w.catch_warnings():
-                                _w.simplefilter("ignore")
-                                _ts_ext, _ep_ext = _strat.compute_target_arrays(
-                                    _slc_ext, _last_params
+                            _reopti_params = _json.loads(_cache_file.read_text())
+                            _reopti_status.append(f"✓ {_pr} cache hit")
+                        except Exception:
+                            _reopti_params = None
+                    if _reopti_params is None:
+                        # Status live pendant la re-opti
+                        _reopti_status.append(f"⏳ {_pr} Optuna 150 trials…")
+                        mo.output.replace(mo.vstack([
+                            mo.md(f"## §5 Replay paire {_row_idx + 1}/{_n_sel_total} : `{_pr}`"),
+                            mo.md(f"_Re-opti extension (anchor {_anchor_iso}, train 90j, 150 trials)_"),
+                            mo.md("\n".join(f"- {s}" for s in _reopti_status[-12:])),
+                        ]))
+                        # Train window [anchor - 90j, anchor]
+                        _ts_anchor = _wfa_end_ts
+                        _train_end_idx = int(_ohlcv.index.searchsorted(_ts_anchor, side="left"))
+                        _train_start_idx = int(_ohlcv.index.searchsorted(
+                            _ts_anchor - pd.Timedelta(days=90), side="left"))
+                        if _train_end_idx - _train_start_idx >= 500:
+                            _train_df = _ohlcv.iloc[_train_start_idx:_train_end_idx]
+                            try:
+                                from engine.tpe_search import run_tpe_fold as _run_tpe
+                                with _w.catch_warnings():
+                                    _w.simplefilter("ignore")
+                                    _res = _run_tpe(
+                                        train_data=_train_df, test_data=_train_df,
+                                        param_space_fn=_strat.param_space,
+                                        run_backtest_fn=_strat.run_backtest,
+                                        score_fn=_strat.score,
+                                        trials=150, min_trades_per_fold=10,
+                                        seed=42, fold_idx=0, n_jobs=1,
+                                    )
+                            except Exception as _eopt:
+                                _errors.append(f"{_key} reopti: {_eopt}")
+                                _res = None
+                            if _res is not None and _res.get("params"):
+                                _reopti_params = _res["params"]
+                                try:
+                                    _cache_file.write_text(
+                                        _json.dumps(_reopti_params, indent=2, default=str)
+                                    )
+                                    _reopti_status[-1] = (
+                                        f"✓ {_pr} re-opti done "
+                                        f"(score train={_res.get('train_metrics', {}).get('sharpe_ratio', 0):.2f})"
+                                    )
+                                except Exception:
+                                    pass
+                            else:
+                                _reopti_status[-1] = f"✗ {_pr} reopti failed"
+                        else:
+                            _reopti_status[-1] = f"✗ {_pr} train trop court"
+                    if _reopti_params is not None:
+                        _wi = max(0, _ext_start - 300)
+                        _slc_ext = _ohlcv.iloc[_wi:_ext_end]
+                        if len(_slc_ext) >= 50:
+                            try:
+                                with _w.catch_warnings():
+                                    _w.simplefilter("ignore")
+                                    _ts_ext, _ep_ext = _strat.compute_target_arrays(
+                                        _slc_ext, _reopti_params
+                                    )
+                            except Exception as _eext:
+                                _errors.append(
+                                    f"{_key} extension compute_target_arrays: {_eext}"
                                 )
-                        except Exception as _eext:
-                            _errors.append(
-                                f"{_key} extension compute_target_arrays: {_eext}"
-                            )
-                            _ts_ext = _ep_ext = None
-                        if _ts_ext is not None and _ep_ext is not None:
-                            _wl_ext = _ext_start - _wi
-                            _size_chunks.append(_ts_ext.iloc[_wl_ext:] * _alloc_eff)
-                            _price_chunks.append(_ep_ext.iloc[_wl_ext:])
+                                _ts_ext = _ep_ext = None
+                            if _ts_ext is not None and _ep_ext is not None:
+                                _wl_ext = _ext_start - _wi
+                                _size_chunks.append(_ts_ext.iloc[_wl_ext:] * _alloc_eff)
+                                _price_chunks.append(_ep_ext.iloc[_wl_ext:])
 
             _size_pair = pd.concat(_size_chunks).sort_index()
             _size_pair = _size_pair[~_size_pair.index.duplicated(keep="last")]
