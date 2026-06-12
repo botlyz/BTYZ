@@ -117,7 +117,7 @@ def build_parser():
     wfa.add_argument("--step-days", type=int, default=DEFAULT_STEP_DAYS)
     wfa.add_argument("--min-trades", type=int, default=DEFAULT_MIN_TRADES_PER_FOLD)
     wfa.add_argument("--warmup", type=int, default=DEFAULT_WARMUP_BARS)
-    wfa.add_argument("--source", default="auto", choices=["auto", "lighter", "binance", "cross_exchange"])
+    wfa.add_argument("--source", default="auto", choices=["auto", "lighter", "binance", "cross_exchange", "gapfill"])
 
     # mccv
     mccv = sub.add_parser("mccv", help="Run MCCV (random-date OOS) for a config")
@@ -132,7 +132,7 @@ def build_parser():
     mccv.add_argument("--train-days", type=int, default=DEFAULT_TRAIN_DAYS)
     mccv.add_argument("--test-days", type=int, default=DEFAULT_TEST_DAYS)
     mccv.add_argument("--min-trades", type=int, default=DEFAULT_MIN_TRADES_PER_FOLD)
-    mccv.add_argument("--source", default="auto", choices=["auto", "lighter", "binance", "cross_exchange"])
+    mccv.add_argument("--source", default="auto", choices=["auto", "lighter", "binance", "cross_exchange", "gapfill"])
 
     return p
 

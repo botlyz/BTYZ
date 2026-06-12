@@ -145,6 +145,72 @@ def load_lighter(pair: str, tf: str = "15min") -> pd.DataFrame | None:
 
 
 @lru_cache(maxsize=32)
+def load_gapfill(pair: str, tf: str = "5min", yf_interval: str = "1h") -> pd.DataFrame | None:
+    """Loader weekend/off-hours gap-fill : Lighter perp 24/7 vs sous-jacent réel (yfinance).
+
+    Aligne sur une grille `tf` (5min par défaut) :
+      - open/high/low/close  : prix Lighter (le perp qu'on TRADE), ffill
+      - fair_value           : dernier close réel CONNU (yfinance ffill)
+      - real_age_min         : âge en minutes du dernier bar réel COMPLÉTÉ
+
+    ANTI-LOOK-AHEAD (donnée) : un bar yfinance intraday est timestampé au DÉBUT
+    de l'intervalle mais son `close` est le prix de FIN d'intervalle. Un ffill brut
+    associerait donc à 19:35 le close de 20:00 (futur). On décale l'index yfinance
+    de +`yf_interval` (fin de barre) → le close n'est « connu » qu'une fois la barre
+    terminée. `real_age_min` est mesuré depuis cette fin de barre. Conséquence : la
+    détection « marché fermé » est légèrement conservatrice (on attend la complétion),
+    jamais optimiste. Le filtre marché-ouvert/fermé est appliqué dans la stratégie via
+    `real_age_min > recent_min`.
+
+    Colonnes toutes numériques (compat WFA/MCCV qui sérialise via DataFrame.values).
+    """
+    base = pair.replace("USDT", "")
+    vbt_freq = FREQ_MAP.get(tf, tf)
+
+    lgt = load_lighter(pair, tf)
+    if lgt is None:
+        return None
+
+    yf_fp = DATA_ROOT / "yfinance" / yf_interval / f"{base}.csv"
+    if not yf_fp.exists():
+        return None
+    try:
+        yf = pd.read_csv(yf_fp, low_memory=False, usecols=["date", "close"])
+    except Exception:
+        return None
+    yf["dt"] = pd.to_datetime(yf["date"], unit="ms", utc=True)
+    yf = yf.set_index("dt").sort_index()[["close"]].rename(columns={"close": "real_close"})
+    yf = yf[~yf.index.duplicated(keep="last")]
+    if len(yf) < 50:
+        return None
+
+    # --- ANTI-LOOK-AHEAD : décale le bar à sa FIN (close connu après complétion) ---
+    yf.index = yf.index + pd.Timedelta(yf_interval)
+
+    start = max(lgt.index[0], yf.index[0])
+    end = min(lgt.index[-1], yf.index[-1])
+    if start >= end:
+        return None
+    grid = pd.date_range(start.ceil(vbt_freq), end.floor(vbt_freq), freq=vbt_freq, tz="UTC")
+    if len(grid) < 1000:
+        return None
+
+    out = pd.DataFrame(index=grid)
+    for col in ("open", "high", "low", "close"):
+        out[col] = lgt[col].reindex(grid, method="ffill")
+    out["fair_value"] = yf["real_close"].reindex(grid, method="ffill")
+    # Âge du dernier bar réel complété (depuis sa FIN, cf. shift ci-dessus)
+    yf_ts_ns = pd.Series(yf.index.view("int64"), index=yf.index).reindex(grid, method="ffill")
+    grid_ns = pd.Series(grid.view("int64"), index=grid)
+    out["real_age_min"] = ((grid_ns - yf_ts_ns) / 1e9 / 60.0).values
+
+    out = out.dropna(subset=["open", "high", "low", "close", "fair_value", "real_age_min"])
+    if len(out) < 1000:
+        return None
+    return out
+
+
+@lru_cache(maxsize=32)
 def load_binance(pair: str, tf: str = "15min") -> pd.DataFrame | None:
     """Load OHLCV from data/raw/binance/{tf}/<PAIR>USDT.csv (already resampled)."""
     pair_usdt = pair if pair.endswith("USDT") else f"{pair}USDT"
@@ -177,6 +243,8 @@ def load_ohlcv(pair: str, tf: str = "15min", source: str = "auto") -> pd.DataFra
         return load_binance(pair, tf)
     if source == "cross_exchange":
         return load_cross_exchange(pair, tf)
+    if source == "gapfill":
+        return load_gapfill(pair, tf)
     lt = load_lighter(pair, tf)
     if lt is not None:
         return lt
@@ -187,4 +255,5 @@ def clear_cache():
     load_lighter.cache_clear()
     load_binance.cache_clear()
     load_cross_exchange.cache_clear()
+    load_gapfill.cache_clear()
     gc.collect()

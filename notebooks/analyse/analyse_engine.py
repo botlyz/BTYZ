@@ -108,7 +108,7 @@ def _helpers(BASE_OHLCV, LIQUIDITY_JSON, RESULTS_ROOT, json, pd):
                 df[c] = pd.to_datetime(df[c], utc=True, errors="coerce")
         return df
 
-    def load_ohlcv(pair, tf, with_cross_exchange=False):
+    def load_ohlcv(pair, tf, with_cross_exchange=False, with_gapfill=False):
         """Charge le CSV 1m de Lighter puis resample à la timeframe demandée.
         Merge aussi signed_rate / apr depuis data/raw/lighter/funding/ si dispo
         (utilise par FUNDING_HARVEST_v1).
@@ -116,7 +116,16 @@ def _helpers(BASE_OHLCV, LIQUIDITY_JSON, RESULTS_ROOT, json, pd):
         Si with_cross_exchange=True (ex: FUNDING_ARB_v1), attache aussi le funding
         Hyperliquid → colonnes signed_rate_lighter, signed_rate_hl, spread. Drop les
         lignes où l'un des deux funding manque.
+
+        Si with_gapfill=True (ex: GAPFILL_v1), délègue à engine.data_loader.load_gapfill
+        → colonnes open/high/low/close (Lighter) + fair_value + real_age_min.
         """
+        if with_gapfill:
+            try:
+                from engine.data_loader import load_gapfill
+                return load_gapfill(pair, tf)
+            except Exception:
+                return None
         fp = BASE_OHLCV / f"{pair}.csv"
         if not fp.exists():
             return None
@@ -525,19 +534,37 @@ def _section4_controls(mo):
         label="BPS fees (override le bps du run_cfg)",
         show_value=True,
     )
+    # Resample de la courbe d'équité : 1D par défaut (léger), "Origine" = tf du run
+    # (granularité native, plus lourd à afficher).
+    resample_radio = mo.ui.radio(
+        options=["1D", "Origine (tf du run)"], value="1D",
+        label="Resample courbe d'équité",
+    )
+    # Fenêtre du candlestick en mode "Origine" : % du span WFA. Affiche le VRAI 5min
+    # natif dans cette fenêtre (impossible sur tout le span = 38k bougies = crash).
+    # Déplace le curseur pour inspecter n'importe quelle zone en 5min réel.
+    cs_window_slider = mo.ui.range_slider(
+        start=0, stop=100, step=1, value=[90, 100],
+        label="Fenêtre candlestick 5min (% du span, mode Origine)",
+        show_value=True,
+    )
     mo.output.replace(mo.vstack([
         mo.md("### §4 — Contrôles"),
         leverage_slider,
         size_pct_slider,
         bps_slider,
+        resample_radio,
+        cs_window_slider,
     ]))
-    return bps_slider, leverage_slider, size_pct_slider
+    return (bps_slider, cs_window_slider, leverage_slider, resample_radio,
+            size_pct_slider)
 
 
 @app.cell
 def _section4_vbt_wf(
     approach_id,
     bps_slider,
+    cs_window_slider,
     folds_df,
     go,
     leverage_slider,
@@ -547,6 +574,7 @@ def _section4_vbt_wf(
     pair,
     parse_tf_bps,
     pd,
+    resample_radio,
     run_cfg,
     size_pct_slider,
 ):
@@ -562,14 +590,18 @@ def _section4_vbt_wf(
     _fees = _bps * 1e-4
     _slippage = 0.0002
 
-    # Detect cross-exchange strategies (e.g., FUNDING_ARB_v1) via DATA_SOURCE attribute
+    # Detect data source (cross_exchange / gapfill) via DATA_SOURCE attribute
     _need_xe = False
+    _need_gapfill = False
     try:
         from engine.approach_loader import load_strategy_module
         _mod_check = load_strategy_module(approach_id)
         _cls = getattr(_mod_check, "Strategy", None)
-        if _cls is not None and getattr(_cls, "DATA_SOURCE", None) == "cross_exchange":
+        _ds = getattr(_cls, "DATA_SOURCE", None) if _cls is not None else None
+        if _ds == "cross_exchange":
             _need_xe = True
+        elif _ds == "gapfill":
+            _need_gapfill = True
         # Override fees per-pair pour les strats cross-exchange (match le WFA runner)
         if _need_xe and hasattr(_mod_check, "_load_pair_fees"):
             _per_pair = _mod_check._load_pair_fees(pair)
@@ -578,7 +610,7 @@ def _section4_vbt_wf(
                 _slippage = 0.0  # half-spread déjà inclus dans _per_pair
     except Exception:
         pass
-    _ohlcv_full = load_ohlcv(pair, _tf_str, with_cross_exchange=_need_xe)
+    _ohlcv_full = load_ohlcv(pair, _tf_str, with_cross_exchange=_need_xe, with_gapfill=_need_gapfill)
     if _ohlcv_full is None:
         mo.output.replace(mo.callout(
             mo.md(f"OHLCV {pair} introuvable dans `data/raw/lighter/1m/`."),
@@ -632,6 +664,7 @@ def _section4_vbt_wf(
 
             _pfs = []
             _last_state = None
+            _last_te = 0
             for _fr in sorted(folds_df.to_dict(orient="records"),
                               key=lambda r: r["fold"]):
                 _params = {k[2:]: v for k, v in _fr.items()
@@ -643,6 +676,11 @@ def _section4_vbt_wf(
 
                 _si = int(_ohlcv_full.index.searchsorted(_test_start))
                 _te = int(_ohlcv_full.index.searchsorted(_test_end, side="right"))
+                # Folds chevauchants (step < test) : clip le début pour ne couvrir
+                # chaque instant qu'une seule fois → courbe continue non dupliquée
+                # (sinon l'index concaténé n'est pas monotone au row_stack).
+                if _si < _last_te:
+                    _si = _last_te
                 if _te <= _si:
                     continue
                 _wi = max(0, _si - 300)
@@ -694,6 +732,7 @@ def _section4_vbt_wf(
                     )
                 _pfs.append(pf_fold)
                 _last_state = pf_fold.last_state
+                _last_te = _te
                 _fold_starts.append(_ohlcv_full.index[_si])
                 _n_folds_used += 1
 
@@ -795,10 +834,13 @@ def _section4_vbt_wf(
                 })
                 _prev_params = _p
 
-            # ── VBT native plot: pf.loc[wf].resample('1D').plot() ──
+            # ── VBT native plot: resample selon le radio (1D par défaut, ou tf d'origine) ──
             with _w.catch_warnings():
                 _w.simplefilter("ignore")
-                _pf_wf_ds = _pf_wf.resample("1D")
+                if str(resample_radio.value).startswith("1D"):
+                    _pf_wf_ds = _pf_wf.resample("1D")
+                else:
+                    _pf_wf_ds = _pf_wf  # tf d'origine = granularité native (pas de resample)
                 _fig_vbt = _pf_wf_ds.plot()
 
             # Remove resampled 'Close' trace — replaced by candlesticks
@@ -807,10 +849,34 @@ def _section4_vbt_wf(
                 if getattr(t, "name", "") != "Close"
             )
 
-            # Candlestick downsamplé (max ~800 bougies)
+            # Candlestick : VRAI resample OHLC (pas de stride). 1D par défaut.
+            # En "Origine" = VRAI 5min natif, mais sur une FENÊTRE (cs_window_slider, %
+            # du span) car envoyer ~38k bougies sature le websocket marimo. Le curseur
+            # déplace la fenêtre pour inspecter n'importe quelle zone en 5min réel.
+            # Garde-fou : si la fenêtre dépasse ~6000 barres, on agrège au plus petit
+            # intervalle rond pour ne pas crasher.
             _ohlcv_wf = _ohlcv_full.loc[_wf_start:_wf_end]
-            _step_c = max(1, len(_ohlcv_wf) // 800)
-            _cslc = _ohlcv_wf.iloc[::_step_c]
+            _agg_ohlc = {"open": "first", "high": "max", "low": "min", "close": "last"}
+            if str(resample_radio.value).startswith("1D"):
+                _cslc = _ohlcv_wf.resample("1D").agg(_agg_ohlc).dropna()
+            else:
+                _n_wf = len(_ohlcv_wf)
+                _w0, _w1 = cs_window_slider.value
+                _lo = int(_n_wf * _w0 / 100.0)
+                _hi = max(_lo + 1, int(_n_wf * _w1 / 100.0))
+                _win = _ohlcv_wf.iloc[_lo:_hi]
+                if len(_win) <= 6000:
+                    _cslc = _win[list(_agg_ohlc)]  # vrai 5min natif
+                else:
+                    # fenêtre trop large -> agrège (intervalle rond) pour survivre
+                    _tot_min = len(_win) * 5
+                    _cslc = None
+                    for _m in (15, 30, 60, 120, 240, 1440):
+                        if _tot_min / _m <= 6000:
+                            _cslc = _win.resample(f"{_m}min").agg(_agg_ohlc).dropna()
+                            break
+                    if _cslc is None:
+                        _cslc = _win.resample("1D").agg(_agg_ohlc).dropna()
             _fig_vbt.add_trace(go.Candlestick(
                 x=_cslc.index,
                 open=_cslc["open"], high=_cslc["high"],
@@ -1145,12 +1211,14 @@ def _section5_portfolio(
             try:
                 _mod_check = _load_mod(_ap)
                 _cls = getattr(_mod_check, "Strategy", None)
-                _need_xe = bool(_cls is not None
-                                and getattr(_cls, "DATA_SOURCE", None) == "cross_exchange")
+                _ds = getattr(_cls, "DATA_SOURCE", None) if _cls is not None else None
+                _need_xe = bool(_ds == "cross_exchange")
+                _need_gapfill = bool(_ds == "gapfill")
             except Exception:
                 _need_xe = False
+                _need_gapfill = False
 
-            _ohlcv = load_ohlcv(_pr, _tf_str, with_cross_exchange=_need_xe)
+            _ohlcv = load_ohlcv(_pr, _tf_str, with_cross_exchange=_need_xe, with_gapfill=_need_gapfill)
             if _ohlcv is None:
                 _errors.append(f"{_key}: OHLCV manquant")
                 continue
@@ -1183,6 +1251,7 @@ def _section5_portfolio(
             _alloc_eff = _alloc_fixed if (_alloc_fixed and _alloc_fixed > 0) else 1.0
 
             _size_chunks, _price_chunks = [], []
+            _last_te = 0
             for _fr in sorted(_folds.to_dict(orient="records"),
                               key=lambda r: r["fold"]):
                 _params = {k[2:]: v for k, v in _fr.items() if k.startswith("p_")}
@@ -1192,6 +1261,10 @@ def _section5_portfolio(
                     continue
                 _si = int(_ohlcv.index.searchsorted(_t0))
                 _te = int(_ohlcv.index.searchsorted(_t1, side="right"))
+                # Folds chevauchants : clip pour éviter les timestamps dupliqués
+                # à la concaténation des chunks (index non monotone).
+                if _si < _last_te:
+                    _si = _last_te
                 if _te <= _si:
                     continue
                 _wi = max(0, _si - 300)
@@ -1212,6 +1285,7 @@ def _section5_portfolio(
                 _wl = _si - _wi
                 _size_chunks.append(_ts.iloc[_wl:] * _alloc_eff)
                 _price_chunks.append(_ep.iloc[_wl:])
+                _last_te = _te
 
             if not _size_chunks:
                 _errors.append(f"{_key}: 0 folds valides")
