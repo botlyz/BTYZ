@@ -19,7 +19,7 @@ app = marimo.App(width="full")
 @app.cell
 def _imports():
     import sys as _sys
-    _sys.path.insert(0, "/home/devbox/BTYZ/src")
+    _sys.path.insert(0, "/home/botlyz-gpu/BTYZ/src")
 
     import json
     import pathlib
@@ -38,7 +38,7 @@ def _imports():
 
 @app.cell
 def _constants(pathlib):
-    RESULTS_ROOT = pathlib.Path("/home/devbox/BTYZ/results")
+    RESULTS_ROOT = pathlib.Path("/home/botlyz-gpu/BTYZ/results")
     return (RESULTS_ROOT,)
 
 

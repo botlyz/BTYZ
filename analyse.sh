@@ -106,7 +106,7 @@ if ! curl -sf "http://localhost:$PORT" -o /dev/null 2>/dev/null; then
 fi
 
 # ── 3. URL Tailscale (direct, pas de tunnel) ─────────────────────────────────
-TAILSCALE_IP="__REDACTED_IP__"
+TAILSCALE_IP="$(tailscale ip -4 2>/dev/null | head -1)"
 TAILSCALE_URL="http://$TAILSCALE_IP:$PORT"
 
 echo ""

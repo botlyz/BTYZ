@@ -53,6 +53,8 @@ MAPPING = {
     "TSM":   ("TSM", "equity"),       # Taiwan Semi ADR (US-listed)
     "ASML":  ("ASML", "equity"),      # ASML ADR (US-listed)
     "GME":   ("GME", "equity"),
+    "RKLB":  ("RKLB", "equity"),      # Rocket Lab
+    "BABA":  ("BABA", "equity"),      # Alibaba ADR
     "CRCL":  ("CRCL", "equity"),      # Circle (may be recent IPO)
     # --- Sector ETFs ---
     "SOXX":  ("SOXX", "etf"),         # semiconductors
@@ -65,8 +67,8 @@ MAPPING = {
     "SPY":   ("SPY", "etf"),          # S&P 500 ETF (~1/10 of index)
     "QQQ":   ("QQQ", "etf"),          # NASDAQ-100 ETF
     "IWM":   ("IWM", "etf"),          # Russell 2000 ETF
-    "US500": ("^GSPC", "index"),      # S&P 500 index (~7575)
-    "US100": ("^NDX", "index"),       # NASDAQ-100 index (~30406)
+    "US500": ("ES=F", "index"),       # S&P 500 FUTURES (quasi 24/5 -> fermé week-end seulement ; ^GSPC cash = piège price discovery nocturne)
+    "US100": ("NQ=F", "index"),       # NASDAQ-100 FUTURES (idem)
     "SPX":   ("^GSPC", "index"),      # S&P 500 index
     # --- Commodities (CME futures front-month, ~24/5) ---
     "WTI":      ("CL=F", "commodity"),   # crude oil West Texas

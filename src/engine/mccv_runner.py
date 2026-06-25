@@ -137,6 +137,18 @@ def run_mccv(approach_id: str, pair: str, tf: str, bps: int,
         return None
 
     fees = bps * 1e-4
+    # Per-pair fees override (même hook que wfa_runner) : si le module stratégie
+    # expose `_load_pair_fees(pair)`, on l'utilise au lieu du bps CLI (fallback).
+    try:
+        from engine.approach_loader import load_strategy_module
+        _mod = load_strategy_module(approach_id)
+        if hasattr(_mod, "_load_pair_fees"):
+            override = _mod._load_pair_fees(pair)
+            if override and override > 0:
+                print(f"[{pair}/{tf}] fees override per-pair = {override*1e4:.2f} bps/fill (vs global {fees*1e4:.2f})")
+                fees = float(override)
+    except Exception as _e:
+        print(f"[{pair}/{tf}] per-pair fees lookup failed: {_e}")
     args_list = []
     for tgt in targets:
         idx = ohlcv.index.searchsorted(tgt, side="left")

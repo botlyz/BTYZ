@@ -27,7 +27,7 @@ app = marimo.App(width="full")
 @app.cell
 def _imports():
     import sys as _sys
-    _sys.path.insert(0, "/home/devbox/BTYZ/src")
+    _sys.path.insert(0, "/home/botlyz-gpu/BTYZ/src")
 
     import json
     import pathlib
@@ -46,9 +46,9 @@ def _imports():
 
 @app.cell
 def _constants(pathlib):
-    RESULTS_ROOT = pathlib.Path("/home/devbox/BTYZ/results")
-    BASE_OHLCV = pathlib.Path("/home/devbox/BTYZ/data/raw/lighter/1m")
-    LIQUIDITY_JSON = pathlib.Path("/home/devbox/BTYZ/liquidity.json")
+    RESULTS_ROOT = pathlib.Path("/home/botlyz-gpu/BTYZ/results")
+    BASE_OHLCV = pathlib.Path("/home/botlyz-gpu/BTYZ/data/raw/lighter/1m")
+    LIQUIDITY_JSON = pathlib.Path("/home/botlyz-gpu/BTYZ/liquidity.json")
     return BASE_OHLCV, LIQUIDITY_JSON, RESULTS_ROOT
 
 
@@ -579,7 +579,7 @@ def _section4_vbt_wf(
     size_pct_slider,
 ):
     import sys as _sys
-    _sys.path.insert(0, "/home/devbox/BTYZ/src")
+    _sys.path.insert(0, "/home/botlyz-gpu/BTYZ/src")
     import warnings as _w
     _w.filterwarnings("ignore")
 
@@ -1051,7 +1051,7 @@ def _section5_portfolio(
     """§5.2 — Replay walk-forward fold-par-fold pour chaque ligne cochée,
     puis VBT Portfolio mutualisé. Gate par `run_btn` (n'exécute que sur click)."""
     import sys as _sys
-    _sys.path.insert(0, "/home/devbox/BTYZ/src")
+    _sys.path.insert(0, "/home/botlyz-gpu/BTYZ/src")
     import warnings as _w
     _w.filterwarnings("ignore")
     import importlib as _importlib
@@ -1100,8 +1100,8 @@ def _section5_portfolio(
         import pathlib as _pathlib
         import json as _json
 
-        _RESULTS_ROOT = _pathlib.Path("/home/devbox/BTYZ/results")
-        _BASE_OHLCV_1M = _pathlib.Path("/home/devbox/BTYZ/data/raw/lighter/1m")
+        _RESULTS_ROOT = _pathlib.Path("/home/botlyz-gpu/BTYZ/results")
+        _BASE_OHLCV_1M = _pathlib.Path("/home/botlyz-gpu/BTYZ/data/raw/lighter/1m")
         _reopti_status = []
         _n_sel_total = len(_sel_df)
 
