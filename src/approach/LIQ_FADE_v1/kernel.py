@@ -101,16 +101,10 @@ def _liq_fade_nb(ts, px, sz, ask, is_liq,
     return (e_ts[:nt], e_px[:nt], x_ts[:nt], x_px[:nt], d_ar[:nt], r_ar[:nt])
 
 
-def run_liq_fade(df, gap_s=3, delay_s=2, hold_s=300, stop_frac=0.0,
-                 buffer_mult=0.1, base_cost_bps=8.0, min_notional=10_000.0):
-    """Wrapper : df ticks -> trades. Réplique l'event study validé.
-    gap_s : gap max entre 2 liq d'un même burst. delay_s : on entre delay_s après la
-    fin du burst. stop_frac : stop-loss (fraction, 0=off). base_cost_bps = coût AR."""
-    ts = df["timestamp"].to_numpy(np.int64)
-    px = df["px"].to_numpy(np.float64)
-    sz = df["sz"].to_numpy(np.float64)
-    ask = df["is_maker_ask"].to_numpy(np.bool_)
-    is_liq = (df["trade_type"].to_numpy().astype("U12") != "trade")  # liquidation|deleverage
+def run_liq_fade_arr(ts, px, sz, ask, is_liq, gap_s=3, delay_s=2, hold_s=300,
+                     stop_frac=0.0, buffer_mult=0.1, base_cost_bps=8.0,
+                     min_notional=10_000.0):
+    """Variante arrays (légère mémoire) : pas de pandas/colonne string."""
     e_ts, e_px, x_ts, x_px, d_ar, r_ar = _liq_fade_nb(
         ts, px, sz, ask, is_liq,
         gap_s * 1000, delay_s * 1000, hold_s * 1000, buffer_mult,
@@ -118,3 +112,15 @@ def run_liq_fade(df, gap_s=3, delay_s=2, hold_s=300, stop_frac=0.0,
     )
     return dict(entry_ts=e_ts, entry_px=e_px, exit_ts=x_ts, exit_px=x_px,
                 dir=d_ar, ret=r_ar)
+
+
+def run_liq_fade(df, gap_s=3, delay_s=2, hold_s=300, stop_frac=0.0,
+                 buffer_mult=0.1, base_cost_bps=8.0, min_notional=10_000.0):
+    """Wrapper df (pratique pour tests). Réplique l'event study validé.
+    gap_s : gap max entre 2 liq d'un même burst. delay_s : on entre delay_s après la
+    fin du burst. stop_frac : stop-loss (fraction, 0=off). base_cost_bps = coût AR."""
+    return run_liq_fade_arr(
+        df["timestamp"].to_numpy(np.int64), df["px"].to_numpy(np.float64),
+        df["sz"].to_numpy(np.float64), df["is_maker_ask"].to_numpy(np.bool_),
+        (df["trade_type"].to_numpy().astype("U12") != "trade"),
+        gap_s, delay_s, hold_s, stop_frac, buffer_mult, base_cost_bps, min_notional)

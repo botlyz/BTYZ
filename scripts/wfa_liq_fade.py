@@ -29,6 +29,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
+import pyarrow.compute as pc
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 warnings.filterwarnings("ignore")
@@ -52,7 +53,7 @@ def _score(ret, min_trades):
 
 def run_pair(pair, train_days, test_days, step_days, trials, integ_bps,
              min_trades, seed):
-    from approach.LIQ_FADE_v1.kernel import run_liq_fade
+    from approach.LIQ_FADE_v1.kernel import run_liq_fade_arr
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -62,16 +63,21 @@ def run_pair(pair, train_days, test_days, step_days, trials, integ_bps,
     n_meta = pq.ParquetFile(f).metadata.num_rows
     if n_meta > MAX_TICKS:
         return pair, "skip_giant"
-    df = pq.read_table(f, columns=["timestamp", "px", "sz", "is_maker_ask",
-                                    "trade_type"]).to_pandas()
-    df = df[df["px"] > 0].reset_index(drop=True)
-    if len(df) < 5000 or (df["trade_type"] != "trade").sum() < 100:
+    # chargement LÉGER : masque liq en pyarrow, arrays numpy seulement (pas de string pandas)
+    tb = pq.read_table(f, columns=["timestamp", "px", "sz", "is_maker_ask", "trade_type"])
+    is_liq = pc.not_equal(tb["trade_type"], "trade").to_numpy(zero_copy_only=False)
+    ts = tb["timestamp"].to_numpy(); px = tb["px"].to_numpy(); sz = tb["sz"].to_numpy()
+    ask = tb["is_maker_ask"].to_numpy(zero_copy_only=False).astype(np.bool_)
+    del tb
+    m = px > 0
+    ts, px, sz, ask, is_liq = ts[m], px[m], sz[m], ask[m], is_liq[m]
+    if len(ts) < 5000 or is_liq.sum() < 100:
         return pair, None
 
     half = EC.get(pair, {}).get("half_spread_bps", 3.0)
     cost_bps = 2 * half + 2 * integ_bps       # aller-retour
 
-    t0, t1 = df["timestamp"].iloc[0], df["timestamp"].iloc[-1]
+    t0, t1 = ts[0], ts[-1]
     DAY = 86400_000
     folds = []
     s = t0
@@ -83,13 +89,14 @@ def run_pair(pair, train_days, test_days, step_days, trials, integ_bps,
     if not folds:
         return pair, "no_fold"
 
-    # index temps pour slicing rapide
-    ts = df["timestamp"].to_numpy()
+    def _slice(a, b):
+        i0, i1 = np.searchsorted(ts, a), np.searchsorted(ts, b)
+        return ts[i0:i1], px[i0:i1], sz[i0:i1], ask[i0:i1], is_liq[i0:i1]
+
     rows = []
     for fi, (a, b, c) in enumerate(folds):
-        tr = df.iloc[np.searchsorted(ts, a):np.searchsorted(ts, b)]
-        te = df.iloc[np.searchsorted(ts, b):np.searchsorted(ts, c)]
-        if len(tr) < 2000 or len(te) < 500:
+        tr = _slice(a, b); te = _slice(b, c)
+        if len(tr[0]) < 2000 or len(te[0]) < 500:
             continue
 
         def objective(trial):
@@ -98,8 +105,8 @@ def run_pair(pair, train_days, test_days, step_days, trials, integ_bps,
             hold = trial.suggest_int("hold_s", 60, 1800, step=60)
             mn = trial.suggest_categorical("min_notional",
                                            [5000, 10000, 25000, 50000, 100000])
-            r = run_liq_fade(tr, gap_s=gap, delay_s=delay, hold_s=hold, stop_frac=0.0,
-                             buffer_mult=0.1, base_cost_bps=cost_bps, min_notional=mn)
+            r = run_liq_fade_arr(*tr, gap_s=gap, delay_s=delay, hold_s=hold, stop_frac=0.0,
+                                 buffer_mult=0.1, base_cost_bps=cost_bps, min_notional=mn)
             return _score(r["ret"], min_trades)
 
         study = optuna.create_study(direction="maximize",
@@ -108,9 +115,9 @@ def run_pair(pair, train_days, test_days, step_days, trials, integ_bps,
         p = study.best_params
 
         # évaluation OOS
-        rt = run_liq_fade(te, gap_s=p["gap_s"], delay_s=p["delay_s"], hold_s=p["hold_s"],
-                          stop_frac=0.0, buffer_mult=0.1, base_cost_bps=cost_bps,
-                          min_notional=p["min_notional"])
+        rt = run_liq_fade_arr(*te, gap_s=p["gap_s"], delay_s=p["delay_s"], hold_s=p["hold_s"],
+                              stop_frac=0.0, buffer_mult=0.1, base_cost_bps=cost_bps,
+                              min_notional=p["min_notional"])
         ret = rt["ret"]
         n = len(ret)
         if n > 0:
@@ -139,7 +146,7 @@ def main():
     ap.add_argument("--test-days", type=int, default=30)
     ap.add_argument("--step-days", type=int, default=30)
     ap.add_argument("--trials", type=int, default=80)
-    ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--workers", type=int, default=22)
     ap.add_argument("--min-trades", type=int, default=10)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
