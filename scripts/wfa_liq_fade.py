@@ -51,6 +51,26 @@ def _score(ret, min_trades):
     return float(ret.mean() / sd * np.sqrt(n))   # ~Sharpe (annualisation neutre vs trials)
 
 
+def _metrics(ret):
+    """Métriques au format moteur (clés lues par le marimo) depuis les rets par trade."""
+    n = len(ret)
+    if n == 0:
+        return {"sharpe_ratio": 0.0, "total_return_pct": 0.0, "total_trades": 0,
+                "max_drawdown_pct": 0.0, "dd_dur_days": 0.0, "profit_factor": 0.0,
+                "win_rate_pct": 0.0}
+    eq = np.cumprod(1 + ret)
+    dd = float((eq / np.maximum.accumulate(eq) - 1).min() * 100)
+    pos = ret[ret > 0].sum(); neg = -ret[ret < 0].sum()
+    pf = float(pos / neg) if neg > 0 else float("inf")
+    return {"sharpe_ratio": round(_score(ret, 1), 4),
+            "total_return_pct": round(float((eq[-1] - 1) * 100), 4),
+            "total_trades": int(n),
+            "max_drawdown_pct": round(dd, 4),
+            "dd_dur_days": 0.0,
+            "profit_factor": round(pf, 4) if np.isfinite(pf) else None,
+            "win_rate_pct": round(float((ret > 0).mean() * 100), 2)}
+
+
 def run_pair(pair, train_days, test_days, step_days, trials, integ_bps,
              min_trades, seed):
     from approach.LIQ_FADE_v1.kernel import run_liq_fade_arr
@@ -93,7 +113,8 @@ def run_pair(pair, train_days, test_days, step_days, trials, integ_bps,
         i0, i1 = np.searchsorted(ts, a), np.searchsorted(ts, b)
         return ts[i0:i1], px[i0:i1], sz[i0:i1], ask[i0:i1], is_liq[i0:i1]
 
-    rows = []
+    fold_objs = []          # format moteur (pour summary.json -> marimo)
+    rows = []               # all_folds.csv lisible
     for fi, (a, b, c) in enumerate(folds):
         tr = _slice(a, b); te = _slice(b, c)
         if len(tr[0]) < 2000 or len(te[0]) < 500:
@@ -114,27 +135,18 @@ def run_pair(pair, train_days, test_days, step_days, trials, integ_bps,
         study.optimize(objective, n_trials=trials, show_progress_bar=False)
         p = study.best_params
 
-        # évaluation OOS
-        rt = run_liq_fade_arr(*te, gap_s=p["gap_s"], delay_s=p["delay_s"], hold_s=p["hold_s"],
-                              stop_frac=0.0, buffer_mult=0.1, base_cost_bps=cost_bps,
-                              min_notional=p["min_notional"])
-        ret = rt["ret"]
-        n = len(ret)
-        if n > 0:
-            eq = np.cumprod(1 + ret)
-            sh = _score(ret, 1)
-            rows.append(dict(fold=fi, **{f"p_{k}": v for k, v in p.items()},
-                             test_trades=n, test_sharpe=round(sh, 3),
-                             test_ret_mean_bps=round(ret.mean() * 1e4, 2),
-                             test_winrate=round((ret > 0).mean() * 100, 1),
-                             test_total_pct=round((eq[-1] - 1) * 100, 2),
-                             cost_ar_bps=round(cost_bps, 1)))
-        else:
-            rows.append(dict(fold=fi, **{f"p_{k}": v for k, v in p.items()},
-                             test_trades=0, test_sharpe=0.0, test_ret_mean_bps=0.0,
-                             test_winrate=0.0, test_total_pct=0.0,
-                             cost_ar_bps=round(cost_bps, 1)))
-    return pair, rows
+        # rejoue best params sur train ET test pour métriques format moteur
+        kw = dict(gap_s=p["gap_s"], delay_s=p["delay_s"], hold_s=p["hold_s"],
+                  stop_frac=0.0, buffer_mult=0.1, base_cost_bps=cost_bps,
+                  min_notional=p["min_notional"])
+        tm = _metrics(run_liq_fade_arr(*tr, **kw)["ret"])
+        xm = _metrics(run_liq_fade_arr(*te, **kw)["ret"])
+        fold_objs.append({"fold": fi, "params": p, "train_metrics": tm, "test_metrics": xm})
+        rows.append(dict(fold=fi, **{f"p_{k}": v for k, v in p.items()},
+                         test_trades=xm["total_trades"], test_sharpe=xm["sharpe_ratio"],
+                         test_winrate=xm["win_rate_pct"], test_total_pct=xm["total_return_pct"],
+                         test_dd_pct=xm["max_drawdown_pct"], cost_ar_bps=round(cost_bps, 1)))
+    return pair, {"rows": rows, "folds": fold_objs, "cost_bps": cost_bps}
 
 
 def main():
@@ -169,15 +181,22 @@ def main():
         for fut in as_completed(futs):
             pair, res = fut.result()
             done += 1
-            if isinstance(res, list) and res:
+            if isinstance(res, dict) and res.get("folds"):
                 d = os.path.join(out, pair)
                 os.makedirs(d, exist_ok=True)
-                dfres = pd.DataFrame(res)
+                dfres = pd.DataFrame(res["rows"])
                 dfres.to_csv(os.path.join(d, "all_folds.csv"), index=False)
+                # summary.json au FORMAT MOTEUR -> lu nativement par le marimo
+                summary = {"approach_id": "LIQ_FADE_v1", "pair": pair, "tf": "tick",
+                           "fees": args.bps * 1e-4, "n_folds": len(res["folds"]),
+                           "folds": res["folds"]}
+                with open(os.path.join(d, "summary.json"), "w") as fh:
+                    json.dump(summary, fh, indent=2, ensure_ascii=False)
                 med = dfres["test_sharpe"].median()
-                print(f"  [{done}/{len(pairs)}] {pair:10} {len(res)} folds | Sharpe OOS méd {med:+.2f}")
+                print(f"  [{done}/{len(pairs)}] {pair:10} {len(res['folds'])} folds | Sharpe OOS méd {med:+.2f}")
             else:
-                print(f"  [{done}/{len(pairs)}] {pair:10} — {res}")
+                r = res.get("folds") if isinstance(res, dict) else res
+                print(f"  [{done}/{len(pairs)}] {pair:10} — {res if not isinstance(res,dict) else 'aucun fold'}")
     print(f"\nFini -> {out}")
 
 
