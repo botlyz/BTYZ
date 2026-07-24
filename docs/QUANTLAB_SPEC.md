@@ -242,6 +242,23 @@ python -m quantlab.cli list | check | screen | optimize | plateau | validate
 - `holdout` demande une confirmation interactive explicite ("BURN <family>" à taper).
 - `status`: table rich du funnel (toutes stratégies × étapes, verdicts, debt, seuil).
 
+## Parallélisme & RAM (exigence utilisateur — machine 24 threads)
+
+- OBJECTIF: 100 % des ressources utilisées sur les phases lourdes, RAM PLATE.
+- Tout fan-out (paires d'un screening, folds/évaluations d'un trial quand le pooled
+  ne vectorise pas, perturbations, permutations, nulles empiriques) passe par
+  `quantlab.parallel.pool_map(fn, items, workers=config.N_WORKERS, progress_handle=...)`
+  — déjà écrit, workers=22, `max_tasks_per_child=32` (recyclage → la RAM d'un worker
+  repart de zéro périodiquement, pas de montée continue).
+- Pas de ProcessPoolExecutor ad hoc dans les modules. Tâches courtes: regrouper via
+  `parallel.chunked` pour amortir le spawn (ne pas ralentir les backtests).
+- Côté worker: la stratégie est ré-importée via `quantlab.registry` (picklable);
+  fin de tâche lourde → `engine.data_loader.clear_cache()` + `gc.collect()`
+  (déjà fait par le recyclage, ne pas en abuser dans les boucles chaudes).
+- Optuna: `gc_after_trial=True`. Le backtest pooled multi-paires reste vectorisé
+  vbt (1 process, il sature déjà BLAS) — on parallélise au niveau au-dessus
+  (trials indépendants ou folds), pas en dessous.
+
 ## Style / qualité
 - Docstrings courtes en français (comme l'existant), pas de sur-commentaire.
 - Chaque agent livre un smoke-test exécutable `tests/smoke_<module>.py`

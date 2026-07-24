@@ -72,6 +72,13 @@ PERMUTATION_BLOCK_BARS = 24     # block bootstrap: taille de bloc (barres)
 WFE_REJECT = 0.30                # < 0.3 -> rejet (l'adaptatif ne sauve PAS)
 WFE_FIXED = 0.50                 # > 0.5 + optima stables -> déploiement fixe
 
+# ---------------------------------------------------------------- parallélisme / RAM
+import os as _os
+N_WORKERS = max(4, min(22, (_os.cpu_count() or 8) - 2))   # saturer la machine (24 threads)
+MAX_TASKS_PER_CHILD = 32    # recyclage des workers -> la RAM ne monte jamais en continu
+# Règles: tout fan-out (paires, folds, permutations, nulles) passe par
+# quantlab.parallel.pool_map ; gc + clear_cache après chaque tâche lourde.
+
 # ---------------------------------------------------------------- pipeline
 STAGES = [
     "contract",      # 0.3 look-ahead + validation du contrat
