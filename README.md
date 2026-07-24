@@ -1,5 +1,11 @@
 # BTYZ
 
+> **Pipeline de recherche : voir [docs/QUANTLAB.md](docs/QUANTLAB.md)** — workflow de
+> validation de stratégies (ledger anti p-hacking, holdout verrouillé, Optuna
+> walk-forward, PBO/DSR/permutation). Ancien workflow WFA/MCCV : `archive/`.
+
+# BTYZ
+
 Backtesting, optimisation de stratégies mean reversion crypto, et pipeline ML order flow — BTC/Binance.
 
 ## Structure

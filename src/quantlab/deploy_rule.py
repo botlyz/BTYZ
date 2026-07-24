@@ -49,6 +49,15 @@ def _ann_sharpe(r: pd.Series, tf: str) -> float:
 
 
 # ------------------------------------------------------------------ WFE
+
+def _pstart(period) -> "pd.Timestamp":
+    """Début de période en tz-aware UTC (les index de données sont UTC)."""
+    return period.start_time.tz_localize("UTC")
+
+
+def _pend(period) -> "pd.Timestamp":
+    return period.end_time.tz_localize("UTC")
+
 def _load_folds(sid: str) -> pd.DataFrame:
     path = config.RESULTS_ROOT / sid / "optimize" / "folds_is_oos.parquet"
     if not path.exists():
@@ -216,13 +225,13 @@ def _adaptive_curve(strategy, datas: dict, *, tf: str, fees: float,
     k = REOPT_TRAIN_MONTHS
     step = 0
     while k < len(months):
-        train_start = months[k - REOPT_TRAIN_MONTHS].start_time
-        train_end = months[k].start_time
+        train_start = _pstart(months[k - REOPT_TRAIN_MONTHS])
+        train_end = _pstart(months[k])
         apply_end_idx = min(k + reopt_m, len(months))
         apply_start = train_end
-        apply_end = (months[apply_end_idx - 1].end_time
+        apply_end = (_pend(months[apply_end_idx - 1])
                      if apply_end_idx == len(months)
-                     else months[apply_end_idx].start_time)
+                     else _pstart(months[apply_end_idx]))
         params, nb = _random_search(
             strategy, datas, tf=tf, fees=fees, start=train_start,
             end=train_end, budget=budget, seed=seed + 1000 * step + k)
@@ -334,7 +343,7 @@ def run(strategy, *, reopt_months=(1, 2, 3), progress=None, ledger=None,
                        f"dev set trop court ({len(months)} mois) pour le "
                        f"méta-backtest — WFE={wfe:.3f}, jeu fixe par défaut",
                        base_metrics, 0)
-    eval_start = months[REOPT_TRAIN_MONTHS].start_time
+    eval_start = _pstart(months[REOPT_TRAIN_MONTHS])
 
     own = progress is None
     if own:
