@@ -5,7 +5,8 @@ PORT=2718
 echo "Nettoyage des instances précédentes..."
 pkill -f "cloudflared tunnel" 2>/dev/null
 pkill -f "marimo edit" 2>/dev/null
-pkill -f "opti.py" 2>/dev/null
+pkill -f "marimo run" 2>/dev/null
+# pkill -f "opti.py" 2>/dev/null  # désactivé pour ne pas tuer l'opti en cours
 sleep 1
 
 # ── Menu ────────────────────────────────────────────────────────────────────
@@ -13,25 +14,33 @@ echo ""
 echo "┌─────────────────────────────────────────┐"
 echo "│              BTYZ Launcher              │"
 echo "├─────────────────────────────────────────┤"
-echo "│  1) Analyse (walk-forward results)      │"
-echo "│  2) CVD Explorer                        │"
-echo "│  3) Optimisation Keltner (opti.py)      │"
-echo "│  4) Optimisation RAM DCA (opti_ram.py)  │"
-echo "│  5) RAM DCA — HYPE Lighter (marimo)     │"
-echo "│  6) Analyse (ancienne version)          │"
+echo "│  1) BTYZ Engine — Visualisation WFA     │"
+echo "│  2) BTYZ Engine — Visualisation MCCV    │"
+echo "│  3) BTYZ Engine — WFA Tuning comparator │"
+echo "│  4) Optimisation Keltner (opti.py)      │"
+echo "│  5) Optimisation RAM DCA (opti_ram.py)  │"
+echo "│  6) RAM DCA — HYPE Lighter (marimo)     │"
+echo "│  7) CVD Explorer                        │"
+echo "│  8) Evaluate ML signals (backtest OOS)  │"
+echo "│  9) Analyse (ancienne version pickle)   │"
+echo "│ 10) Analyse (legacy)                    │"
 echo "└─────────────────────────────────────────┘"
 echo ""
-read -p "  Choix [1-6] : " CHOICE
+read -p "  Choix [1-10] : " CHOICE
 
 case "$CHOICE" in
-    1) MODE="analyse"   ;;
-    2) MODE="cvd"       ;;
-    3) MODE="opti"      ;;
-    4) MODE="opti_ram"  ;;
-    5) MODE="ram"       ;;
-    6) MODE="old"       ;;
-    *) echo "Choix invalide. Lancement de l'analyse par défaut."
-       MODE="analyse"   ;;
+    1) MODE="engine_wfa"   ;;
+    2) MODE="engine_mccv"  ;;
+    3) MODE="engine_tuning";;
+    4) MODE="opti"      ;;
+    5) MODE="opti_ram"  ;;
+    6) MODE="ram"       ;;
+    7) MODE="cvd"       ;;
+    8) MODE="evaluate"  ;;
+    9) MODE="analyse"   ;;
+    10) MODE="old"      ;;
+    *) echo "Choix invalide. Lancement de la visualisation WFA par défaut."
+       MODE="engine_wfa"   ;;
 esac
 
 # ── Mode opti : pas de marimo ────────────────────────────────────────────────
@@ -60,15 +69,26 @@ elif [ "$MODE" = "cvd" ]; then
     NB="notebooks/cvd_explorer.py"
 elif [ "$MODE" = "ram" ]; then
     NB="notebooks/ram_dca_lighter.py"
-else
+elif [ "$MODE" = "evaluate" ]; then
+    NB="notebooks/evaluate.py"
+elif [ "$MODE" = "engine_wfa" ]; then
+    NB="notebooks/analyse/analyse_engine.py"
+elif [ "$MODE" = "engine_mccv" ]; then
+    NB="notebooks/analyse/analyse_mccv.py"
+elif [ "$MODE" = "engine_tuning" ]; then
+    NB="notebooks/analyse/analyse_wfa_tuning.py"
+elif [ "$MODE" = "analyse" ]; then
     NB="notebooks/analyse_full.py"
+else
+    NB="notebooks/analyse/analyse_engine.py"
 fi
 
 # ── 1. Lancer marimo ─────────────────────────────────────────────────────────
 export MARIMO_OUTPUT_MAX_BYTES=200000000
 echo ""
+MARIMO_CMD="run"
 echo "Démarrage de marimo → $NB"
-.venv/bin/marimo edit "$NB" --host 0.0.0.0 --port $PORT --headless --no-token &
+.venv/bin/marimo $MARIMO_CMD "$NB" --host 0.0.0.0 --port $PORT --headless --no-token &
 MARIMO_PID=$!
 
 # ── 2. Attendre que le serveur HTTP réponde (max 60s) ────────────────────────
@@ -85,40 +105,17 @@ if ! curl -sf "http://localhost:$PORT" -o /dev/null 2>/dev/null; then
     exit 1
 fi
 
-# ── 3. Lancer cloudflared ────────────────────────────────────────────────────
-LOGFILE=$(mktemp /tmp/cloudflared.XXXXXX.log)
-cloudflared tunnel --url http://localhost:$PORT > "$LOGFILE" 2>&1 &
-CF_PID=$!
+# ── 3. URL Tailscale (direct, pas de tunnel) ─────────────────────────────────
+TAILSCALE_IP="$(tailscale ip -4 2>/dev/null | head -1)"
+TAILSCALE_URL="http://$TAILSCALE_IP:$PORT"
 
-# ── 4. Attendre l'URL (max 30s) ──────────────────────────────────────────────
-URL=""
-for i in $(seq 1 30); do
-    URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' "$LOGFILE" 2>/dev/null | head -1)
-    [ -n "$URL" ] && break
-    sleep 1
-done
+echo ""
+echo "┌──────────────────────────────────────────────────────────┐"
+echo "│  $NB"
+echo "│  Tailscale : $TAILSCALE_URL"
+echo "│  Local     : http://localhost:$PORT"
+echo "└──────────────────────────────────────────────────────────┘"
+echo ""
 
-if [ -z "$URL" ]; then
-    echo "Timeout: URL Cloudflare non trouvée. Accès local : http://localhost:$PORT"
-else
-    echo "Vérification du tunnel..."
-    for i in $(seq 1 20); do
-        if curl -sf --max-time 3 "$URL" -o /dev/null 2>/dev/null; then
-            break
-        fi
-        sleep 1
-    done
-    echo ""
-    echo "┌──────────────────────────────────────────────────────────┐"
-    echo "│  $NB"
-    echo "│  Lien : $URL"
-    echo "└──────────────────────────────────────────────────────────┘"
-    echo ""
-fi
-
-# ── 5. Attendre Ctrl+C ───────────────────────────────────────────────────────
+# ── 4. Attendre Ctrl+C ───────────────────────────────────────────────────────
 wait $MARIMO_PID
-
-# Cleanup
-kill $CF_PID 2>/dev/null
-rm -f "$LOGFILE"

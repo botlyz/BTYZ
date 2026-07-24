@@ -3,6 +3,26 @@ __pycache__/
 .ipynb_checkpoints/
 *.pyc
 *.cfg
+*.bak
+*.bak_*
 .DS_Store
 cache/
+data/
 data/raw/
+logs/
+chunk_cache_*/
+liquidity_v*.json
+liquidity_new.json
+research/*.log
+notebooks/__marimo__/session/
+**/__marimo__/
+results/
+
+# quantlab
+/data
+/results
+/cache
+ledger.db
+ledger.db-*
+*.log
+data/quantlab_store/

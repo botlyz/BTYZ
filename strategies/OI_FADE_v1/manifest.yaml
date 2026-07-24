@@ -1,0 +1,10 @@
+family: OI_FADE
+version: 1
+data_source: oi          # OHLCV Lighter + open interest Binance (colonne oi)
+tf: 1h
+screen_tfs: [1h]         # OI Binance en 5min natif -> ne pas descendre sous 15m
+notes: >
+  Fade des pumps à OI croissant (crowding). Migration 1:1 de
+  archive/approach/OI_FADE_v1 — z-scores et quantile rolling past-only
+  (ROLL=240 barres, fixe), short only, sortie td_stop (hold barres) + SL dur.
+  DEFAULT_PARAMS = médianes des 597 folds WFA de results/OI_FADE_v1/full.

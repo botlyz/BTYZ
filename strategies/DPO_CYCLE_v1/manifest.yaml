@@ -1,0 +1,14 @@
+family: DPO_CYCLE
+version: 1
+data_source: lighter
+tf: 4h
+screen_tfs: [1m, 3m, 5m, 15m, 1h, 4h]
+free_params: [period, norm, thr]
+grid:
+  period: [10, 20, 40]
+  norm: [50, 100, 200]
+  thr: [1.0, 1.5, 2.0]
+notes: >
+  Detrended Price Oscillator (période 20) normalisé par écart-type (fenêtre 100),
+  entrées/sorties aux croisements ±1,5σ, long+short, sans stop. Preset builder.
+  DPO calculé en version causale (décalage arrière, jamais avant).

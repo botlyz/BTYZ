@@ -1,0 +1,9 @@
+family: SMA_CROSS
+version: 1
+data_source: lighter
+tf: 1h
+screen_tfs: [1h]
+notes: >
+  Fixture de test du pipeline quantlab. Long only, cross up = entrée,
+  cross down = sortie. Trivialement causale, aucune prétention d'edge —
+  attendue REJECT aux étapes statistiques (test négatif).
