@@ -1,8 +1,8 @@
 family: RAM_ENV
 version: 1
 data_source: lighter
-tf: 1h
-screen_tfs: [1m, 3m, 5m, 15m, 1h, 4h]
+tf: 3m
+screen_tfs: [1m, 3m, 5m]
 free_params: [ma_window, env_pct]
 grid:
   ma_window: [50, 200]

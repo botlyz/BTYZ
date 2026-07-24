@@ -29,14 +29,15 @@ class Strategy(BaseStrategy):
     VERSION = 1
 
     DATA_SOURCE = "lighter"      # OHLCV simple
-    TF = "1h"                    # timeframe native (référence)
-    # l'utilisateur veut screener toutes les timeframes :
-    SCREEN_TFS = ["1m", "3m", "5m", "15m", "1h", "4h"]
+    TF = "3m"                    # timeframe native : la micro-réversion vit sur du rapide
+    # screening resserré sur les TF rapides (le 1h/4h n'a pas d'edge de réversion) :
+    SCREEN_TFS = ["1m", "3m", "5m"]
     WARMUP_BARS = 260            # max(ma_window) + marge
 
     # point unique du screening (mêmes valeurs sur toutes les paires) :
-    # centre de la grille, robuste par défaut.
-    DEFAULT_PARAMS = {"ma_window": 200, "env_pct": 0.05}
+    # sur TF rapide (3m), MA courte + enveloppe serrée -> assez de trades pour
+    # une p-value fiable. Reste un point de la grille déclarée.
+    DEFAULT_PARAMS = {"ma_window": 50, "env_pct": 0.03}
 
     # stop de protection structurel — jamais optimisé.
     FIXED = {"sl_pct": 0.15}
