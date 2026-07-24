@@ -8,10 +8,18 @@ mais du **bruit de microstructure** : sur-réaction à une nouvelle, cascade de
 liquidations, mèches sur carnet fin, exécution agressive d'un gros ordre. Ce
 bruit se résorbe statistiquement — le prix « revient à la moyenne ».
 
-On fade donc l'écart :
-- prix **sous** la bande basse `MA·(1 − env)` → on achète (le creux est excessif),
-- prix **au-dessus** de la bande haute `MA·(1 + env)` → on vend (le pic est excessif),
+On fade donc l'écart, **mais uniquement dans le sens de la tendance de fond**
+(filtre par une grande SMA `sma_trend`) :
+- prix **sous** la bande basse `MA·(1 − env)` **ET** en uptrend (close ≥ SMA_trend)
+  → on achète (le creux est excessif, la tendance nous porte),
+- prix **au-dessus** de la bande haute `MA·(1 + env)` **ET** en downtrend
+  (close ≤ SMA_trend) → on vend (le pic est excessif),
 - on **sort au retour à la moyenne** (close qui recroise la MA).
+
+Le filtre de tendance est le cœur de cette version : fader à nu un rip dans un
+marché qui monte saigne. En ne fadant que dans le sens de la tendance, on
+concentre les trades sur les setups à plus fort edge — l'objectif est de faire
+passer le gain par trade au-dessus des coûts, là où la version nue échouait.
 
 ## Pourquoi ça peut marcher — et quand ça casse
 

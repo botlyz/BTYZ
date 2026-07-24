@@ -1,19 +1,20 @@
-"""RAM_ENV_v1 — retour à la moyenne par enveloppe sur moyenne mobile.
+"""RAM_ENV_v1 — retour à la moyenne par enveloppe + filtre de tendance.
 
 Thèse : sur un horizon court, un écart marqué du prix à sa moyenne mobile est
-en partie du bruit qui se résorbe (sur-réaction, liquidations, mèches). On fade
-l'écart et on sort au retour à la moyenne. Voir RATIONALE.md.
+en partie du bruit qui se résorbe. On fade l'écart et on sort au retour à la
+moyenne — MAIS seulement dans le sens de la tendance de fond (grande SMA), pour
+ne pas se coucher devant un train en tendance forte. Voir RATIONALE.md.
 
 Signal (source "lighter" = OHLCV simple), STRICTEMENT causal (rolling past-only) :
   ma    = SMA(ma_window) du close
+  trend = SMA(sma_trend) du close    (filtre de tendance, grande fenêtre)
   bande basse = ma·(1 - env_pct) , bande haute = ma·(1 + env_pct)
-  LONG  quand close < bande basse   -> sortie quand close >= ma (retour moyenne)
-  SHORT quand close > bande haute   -> sortie quand close <= ma
-  SL dur `sl_pct` (FIXED, structurel — un mean-rev sans stop peut saigner en
-  tendance forte ; ce n'est pas un paramètre de recherche).
+  LONG  quand close < bande basse  ET  close >= trend  (fade le creux en uptrend)
+  SHORT quand close > bande haute  ET  close <= trend  (fade le rip en downtrend)
+  Sortie : retour à la moyenne (close recroise `ma`). SL dur `sl_pct` (FIXED).
 
-Grille d'optimisation (2 params libres, 6 combinaisons) :
-  ma_window ∈ {50, 200}   ·   env_pct ∈ {3 %, 5 %, 8 %}
+Grille d'optimisation (3 params libres, 12 combinaisons) :
+  ma_window ∈ {50, 200} · env_pct ∈ {3 %, 5 %, 8 %} · sma_trend ∈ {500, 2000}
 """
 from __future__ import annotations
 
@@ -30,14 +31,13 @@ class Strategy(BaseStrategy):
 
     DATA_SOURCE = "lighter"      # OHLCV simple
     TF = "3m"                    # timeframe native : la micro-réversion vit sur du rapide
-    # screening resserré sur les TF rapides (le 1h/4h n'a pas d'edge de réversion) :
     SCREEN_TFS = ["1m", "3m", "5m"]
-    WARMUP_BARS = 260            # max(ma_window) + marge
+    WARMUP_BARS = 2100           # max(sma_trend) + marge
 
     # point unique du screening (mêmes valeurs sur toutes les paires) :
-    # sur TF rapide (3m), MA courte + enveloppe serrée -> assez de trades pour
-    # une p-value fiable. Reste un point de la grille déclarée.
-    DEFAULT_PARAMS = {"ma_window": 50, "env_pct": 0.03}
+    # MA courte + enveloppe serrée + filtre de tendance permissif -> assez de
+    # trades pour une p-value fiable. Reste un point de la grille déclarée.
+    DEFAULT_PARAMS = {"ma_window": 50, "env_pct": 0.03, "sma_trend": 500}
 
     # stop de protection structurel — jamais optimisé.
     FIXED = {"sl_pct": 0.15}
@@ -46,15 +46,23 @@ class Strategy(BaseStrategy):
         p = self.full_params(params)
         w = int(p["ma_window"])
         env = float(p["env_pct"])
+        st = int(p["sma_trend"])
 
         close = data["close"]
         ma = close.rolling(w).mean()          # causal (past-only)
+        trend = close.rolling(st).mean()      # filtre de tendance, causal
         lower = ma * (1.0 - env)
         upper = ma * (1.0 + env)
 
-        long_entries = (close < lower).fillna(False)
+        # filtre de RÉGIME : la MA rapide au-dessus/dessous de la grande SMA
+        # (ne pas utiliser close vs trend -> le creux d'entrée annulerait le
+        # signal, vidant la stratégie sur les majors peu volatiles).
+        uptrend = ma >= trend
+        downtrend = ma <= trend
+
+        long_entries = ((close < lower) & uptrend).fillna(False)
         long_exits = (close >= ma).fillna(False)
-        short_entries = (close > upper).fillna(False)
+        short_entries = ((close > upper) & downtrend).fillna(False)
         short_exits = (close <= ma).fillna(False)
 
         return Signals(
@@ -69,4 +77,5 @@ class Strategy(BaseStrategy):
         return {
             "ma_window": trial.suggest_categorical("ma_window", [50, 200]),
             "env_pct": trial.suggest_categorical("env_pct", [0.03, 0.05, 0.08]),
+            "sma_trend": trial.suggest_categorical("sma_trend", [500, 2000]),
         }

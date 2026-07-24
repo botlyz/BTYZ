@@ -3,10 +3,12 @@ version: 1
 data_source: lighter
 tf: 3m
 screen_tfs: [1m, 3m, 5m]
-free_params: [ma_window, env_pct]
+free_params: [ma_window, env_pct, sma_trend]
 grid:
   ma_window: [50, 200]
   env_pct: [0.03, 0.05, 0.08]
+  sma_trend: [500, 2000]
 notes: >
-  Retour à la moyenne par enveloppe SMA, long+short symétrique, sortie au retour
-  à la MA, stop de protection fixe 15%. Screené sur toutes les timeframes Lighter.
+  Retour à la moyenne par enveloppe SMA + filtre de tendance (grande SMA) : long
+  seulement en uptrend, short seulement en downtrend. Sortie au retour à la MA,
+  stop de protection fixe 15%. TF native 3m, screené sur 1m/3m/5m.
