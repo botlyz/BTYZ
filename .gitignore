@@ -17,3 +17,12 @@ research/*.log
 notebooks/__marimo__/session/
 **/__marimo__/
 results/
+
+# quantlab
+/data
+/results
+/cache
+ledger.db
+ledger.db-*
+*.log
+data/quantlab_store/

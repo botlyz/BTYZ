@@ -145,6 +145,33 @@ def load_lighter(pair: str, tf: str = "15min") -> pd.DataFrame | None:
 
 
 @lru_cache(maxsize=32)
+@lru_cache(maxsize=32)
+def load_oi(pair: str, tf: str = "1h") -> pd.DataFrame | None:
+    """OHLCV Lighter + open interest Binance (data/raw/binance/metrics/<PAIR>USDT.parquet).
+
+    Colonne ajoutée : `oi` = sum_open_interest_value (USD), resamplée à tf (last),
+    ffill borné 2 barres. Bars sans OI connue -> supprimées (début d'historique).
+    """
+    # resample depuis le 5m (les fichiers 1h directs peuvent être plus vieux)
+    df = load_lighter(pair, "5min")
+    if df is None:
+        df = load_lighter(pair, tf)
+    else:
+        df = df.resample(tf).agg({"open": "first", "high": "max", "low": "min",
+                                  "close": "last", "volume": "sum"}).dropna(subset=["close"])
+    if df is None:
+        return None
+    fp = DATA_ROOT / "binance" / "metrics" / f"{pair}USDT.parquet"
+    if not fp.exists():
+        return None
+    m = pd.read_parquet(fp, columns=["create_time", "sum_open_interest_value"])
+    oi = m.set_index("create_time")["sum_open_interest_value"].resample(tf).last()
+    df = df.copy()
+    df["oi"] = oi.reindex(df.index).ffill(limit=2)
+    df = df[df["oi"].notna()]
+    return df if len(df) else None
+
+
 def load_gapfill(pair: str, tf: str = "5min", yf_interval: str = "1h") -> pd.DataFrame | None:
     """Loader weekend/off-hours gap-fill : Lighter perp 24/7 vs sous-jacent réel (yfinance).
 
@@ -245,6 +272,8 @@ def load_ohlcv(pair: str, tf: str = "15min", source: str = "auto") -> pd.DataFra
         return load_cross_exchange(pair, tf)
     if source == "gapfill":
         return load_gapfill(pair, tf)
+    if source == "oi":
+        return load_oi(pair, tf)
     lt = load_lighter(pair, tf)
     if lt is not None:
         return lt
@@ -256,4 +285,5 @@ def clear_cache():
     load_binance.cache_clear()
     load_cross_exchange.cache_clear()
     load_gapfill.cache_clear()
+    load_oi.cache_clear()
     gc.collect()
